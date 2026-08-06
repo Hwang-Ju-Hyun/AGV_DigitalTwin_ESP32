@@ -1,0 +1,28 @@
+# PlatformIO build output and dependency caches
+.pio/
+.pioenvs/
+.piolibdeps/
+/build/
+/dist/
+compile_commands.json
+
+# Local/temporary build workspaces
+.codex_tmp_l_route/
+
+# Editor-generated and machine-local workspace files
+.vscode/
+*.code-workspace
+
+# Local credentials and private key material
+# Never commit, print, or share include/Secrets.hpp.
+include/Secrets.hpp
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs and operating-system metadata
+*.log
+.DS_Store
+Thumbs.db
