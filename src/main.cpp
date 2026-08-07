@@ -129,8 +129,12 @@ namespace
         case RouteExecutor::State::RUNNING:
             Serial.println("[MOTION] 30 cm encoder drive started; target=520");
             break;
+        case RouteExecutor::State::SETTLING:
+            Serial.println("[SAFE] Target reached; PWM=0 STBY=LOW");
+            Serial.println("[MOTION] Verifying encoder stability for 150 ms");
+            break;
         case RouteExecutor::State::ARRIVAL_PENDING:
-            Serial.println("[MOTION] Target reached and outputs verified safe");
+            Serial.println("[MOTION] Encoder stability verified; arrival pending");
             break;
         case RouteExecutor::State::ARRIVAL_REPORTED:
             Serial.println("[RobotProtocol] ARRIVED sent; run latched complete");
@@ -157,6 +161,16 @@ namespace
         const RouteExecutor::BootResult result =
             routeExecutor.handleBootPress(nowMs, sessionReady());
         Serial.printf("[BOOT] %s\n", RouteExecutor::bootResultName(result));
+
+        if (result == RouteExecutor::BootResult::COUNTDOWN_CANCELLED)
+        {
+            Serial.printf("[SAFE] Countdown cancelled; routeID=%lu retained\n",
+                          static_cast<unsigned long>(routeExecutor.routeID()));
+        }
+        else if (result == RouteExecutor::BootResult::ESTOP_LATCHED)
+        {
+            Serial.println("[SAFE] BOOT emergency stop: PWM=0 STBY=LOW");
+        }
     }
 
     void configureCallbacks()

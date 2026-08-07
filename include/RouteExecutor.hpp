@@ -15,6 +15,7 @@ public:
         WAIT_BOOT,
         COUNTDOWN,
         RUNNING,
+        SETTLING,
         ARRIVAL_PENDING,
         ARRIVAL_REPORTED,
         OUTPUT_LOCKED,
@@ -36,6 +37,7 @@ public:
     {
         COUNTDOWN_STARTED,
         COUNTDOWN_CANCELLED,
+        ESTOP_LATCHED,
         REJECTED_NOT_READY,
         IGNORED
     };

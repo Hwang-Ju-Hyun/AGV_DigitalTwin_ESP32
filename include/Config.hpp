@@ -29,6 +29,8 @@ namespace AppConfig
     static constexpr uint32_t kDemoStartNodeID = 1;
     static constexpr uint32_t kDemoTargetNodeID = 2;
     static constexpr int32_t kForward30CmCount = 520;
+    static constexpr uint32_t kEncoderSettleStableMs = 150;
+    static constexpr uint32_t kEncoderSettleTimeoutMs = 2000;
     static constexpr uint32_t kApprovalCountdownMs = 5000;
     static constexpr int kBootButtonPin = 0;
     static constexpr uint32_t kButtonDebounceMs = 50;

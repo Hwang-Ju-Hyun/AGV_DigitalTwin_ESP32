@@ -69,9 +69,30 @@ RouteExecutor::RouteResult RouteExecutor::acceptRoute(
 RouteExecutor::BootResult RouteExecutor::handleBootPress(uint32_t nowMs,
                                                          bool sessionReady)
 {
+    if (m_State == State::RUNNING
+        || m_State == State::SETTLING
+        || m_State == State::ARRIVAL_PENDING)
+    {
+        // A local BOOT press during or immediately after physical motion is an
+        // emergency stop. This path deliberately runs before session checks.
+        emergencyStop();
+        return BootResult::ESTOP_LATCHED;
+    }
+
     if (m_State == State::COUNTDOWN)
     {
-        cancelRoute();
+        m_Motion.stopImmediately();
+        if (!m_Motion.outputsSafe())
+        {
+            latchFault(Fault::OUTPUTS_NOT_SAFE, kFaultDetailOutputsNotSafe);
+            return BootResult::REJECTED_NOT_READY;
+        }
+
+        // This is a local approval cancellation, not a Server route cancel.
+        // Keep the exact route so the operator may approve it again.
+        m_CountdownStartedMs = 0;
+        m_MotionCompleted = false;
+        m_State = State::WAIT_BOOT;
         return BootResult::COUNTDOWN_CANCELLED;
     }
 
@@ -142,7 +163,7 @@ void RouteExecutor::update(uint32_t nowMs, bool sessionReady)
         return;
     }
 
-    if (m_State != State::RUNNING)
+    if (m_State != State::RUNNING && m_State != State::SETTLING)
         return;
 
     const MotionController::UpdateResult updateResult = m_Motion.update(nowMs);
@@ -156,7 +177,22 @@ void RouteExecutor::update(uint32_t nowMs, bool sessionReady)
     }
 
     if (updateResult == MotionController::UpdateResult::RUNNING)
+    {
+        m_State = State::RUNNING;
         return;
+    }
+
+    if (updateResult == MotionController::UpdateResult::SETTLING)
+    {
+        if (!m_Motion.outputsSafe())
+        {
+            latchFault(Fault::OUTPUTS_NOT_SAFE, kFaultDetailOutputsNotSafe);
+            return;
+        }
+
+        m_State = State::SETTLING;
+        return;
+    }
 
     if (updateResult != MotionController::UpdateResult::COMPLETE)
     {
@@ -198,6 +234,7 @@ void RouteExecutor::onNetworkLost()
         break;
 
     case State::RUNNING:
+    case State::SETTLING:
     case State::ARRIVAL_PENDING:
         latchFault(Fault::NETWORK_LOST, kFaultDetailNetworkLost);
         break;
@@ -284,11 +321,14 @@ RobotProtocol::StatusPayload RouteExecutor::buildStatus() const
     const bool hasEncoderLegProgress = !m_MotionCompleted
         && snapshot.progress > 0.0f
         && (m_State == State::RUNNING
+            || m_State == State::SETTLING
             || m_State == State::FAULT_LATCHED
             || m_State == State::ESTOP_LATCHED);
     // Server ee3244f interprets this field as the target node ID when deriving
     // the node-to-node pose for Unity, despite its historical field name.
-    status.currentLinkID = (m_State == State::RUNNING || hasEncoderLegProgress)
+    status.currentLinkID = (m_State == State::RUNNING
+                            || m_State == State::SETTLING
+                            || hasEncoderLegProgress)
         ? AppConfig::kDemoTargetNodeID
         : 0;
     status.progress = m_MotionCompleted ? 1.0f : 0.0f;
@@ -299,7 +339,7 @@ RobotProtocol::StatusPayload RouteExecutor::buildStatus() const
     status.battery = 100.0f; // Placeholder while the battery remains isolated.
     status.state = RobotProtocol::RobotState::IDLE;
 
-    if (m_State == State::RUNNING)
+    if (m_State == State::RUNNING || m_State == State::SETTLING)
     {
         status.progress = snapshot.progress;
         status.state = RobotProtocol::RobotState::MOVING;
@@ -339,6 +379,7 @@ const char* RouteExecutor::stateName(State state)
     case State::WAIT_BOOT:         return "WAIT_BOOT";
     case State::COUNTDOWN:         return "COUNTDOWN";
     case State::RUNNING:           return "RUNNING";
+    case State::SETTLING:          return "SETTLING";
     case State::ARRIVAL_PENDING:   return "ARRIVAL_PENDING";
     case State::ARRIVAL_REPORTED:  return "ARRIVAL_REPORTED";
     case State::OUTPUT_LOCKED:     return "OUTPUT_LOCKED";
@@ -368,6 +409,7 @@ const char* RouteExecutor::bootResultName(BootResult result)
     {
     case BootResult::COUNTDOWN_STARTED:   return "COUNTDOWN_STARTED";
     case BootResult::COUNTDOWN_CANCELLED: return "COUNTDOWN_CANCELLED";
+    case BootResult::ESTOP_LATCHED:       return "ESTOP_LATCHED";
     case BootResult::REJECTED_NOT_READY:  return "REJECTED_NOT_READY";
     case BootResult::IGNORED:             return "IGNORED";
     default:                              return "UNKNOWN";

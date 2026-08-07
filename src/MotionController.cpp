@@ -47,6 +47,7 @@ namespace
 
 volatile int32_t MotionController::s_LeftCount = 0;
 volatile int32_t MotionController::s_RightCount = 0;
+volatile uint32_t MotionController::s_EncoderActivitySequence = 0;
 portMUX_TYPE MotionController::s_EncoderMux = portMUX_INITIALIZER_UNLOCKED;
 
 void IRAM_ATTR MotionController::leftEncoderISR()
@@ -57,6 +58,7 @@ void IRAM_ATTR MotionController::leftEncoderISR()
         --s_LeftCount;
     else
         ++s_LeftCount;
+    ++s_EncoderActivitySequence;
     portEXIT_CRITICAL_ISR(&s_EncoderMux);
 }
 
@@ -68,6 +70,7 @@ void IRAM_ATTR MotionController::rightEncoderISR()
         ++s_RightCount;
     else
         --s_RightCount;
+    ++s_EncoderActivitySequence;
     portEXIT_CRITICAL_ISR(&s_EncoderMux);
 }
 
@@ -79,11 +82,23 @@ void MotionController::readEncoderCounts(int32_t& left, int32_t& right)
     portEXIT_CRITICAL(&s_EncoderMux);
 }
 
+void MotionController::readEncoderState(int32_t& left,
+                                        int32_t& right,
+                                        uint32_t& activitySequence)
+{
+    portENTER_CRITICAL(&s_EncoderMux);
+    left = s_LeftCount;
+    right = s_RightCount;
+    activitySequence = s_EncoderActivitySequence;
+    portEXIT_CRITICAL(&s_EncoderMux);
+}
+
 void MotionController::resetEncoderCounts()
 {
     portENTER_CRITICAL(&s_EncoderMux);
     s_LeftCount = 0;
     s_RightCount = 0;
+    s_EncoderActivitySequence = 0;
     portEXIT_CRITICAL(&s_EncoderMux);
 }
 
@@ -153,7 +168,7 @@ MotionController::StartResult MotionController::startForward(int32_t targetCount
         return StartResult::FAULT_LATCHED;
     }
 
-    if (m_State == State::RUNNING)
+    if (m_State == State::RUNNING || m_State == State::SETTLING)
         return StartResult::ALREADY_RUNNING;
 
     if (targetCount <= 0 || targetCount > INT32_MAX - kCountOverrunAllowance)
@@ -175,11 +190,16 @@ MotionController::StartResult MotionController::startForward(int32_t targetCount
     m_TargetCount = targetCount;
     m_MotionStartedMs = nowMs;
     m_FinalElapsedMs = 0;
+    m_SettlingStartedMs = 0;
+    m_SettlingStableSinceMs = 0;
     m_LastProgressCheckMs = nowMs;
     m_LastVelocitySampleMs = nowMs;
     m_LastProgressLeft = 0;
     m_LastProgressRight = 0;
     m_LastVelocityAverage = 0;
+    m_SettlingLastLeft = 0;
+    m_SettlingLastRight = 0;
+    m_SettlingLastActivitySequence = 0;
     m_LeftNoProgressWindows = 0;
     m_RightNoProgressWindows = 0;
     m_VelocityCountsPerSecond = 0.0f;
@@ -204,6 +224,9 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
                              : latchFault(Fault::OUTPUT_INVARIANT, nowMs);
     }
 
+    if (m_State == State::SETTLING)
+        return updateSettling(nowMs);
+
     if (m_State != State::RUNNING)
     {
         if (m_Initialized)
@@ -216,7 +239,27 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
 
     int32_t leftCount = 0;
     int32_t rightCount = 0;
-    readEncoderCounts(leftCount, rightCount);
+    uint32_t activitySequence = 0;
+    readEncoderState(leftCount, rightCount, activitySequence);
+
+    if (leftCount >= m_TargetCount && rightCount >= m_TargetCount)
+    {
+        // Remove drive power on the same control-loop sample that observes
+        // both targets. Encoder stability is verified afterwards without a
+        // blocking delay.
+        forceSafeOutputs();
+        if (!outputsSafe())
+            return latchFault(Fault::OUTPUT_INVARIANT, nowMs);
+
+        m_VelocityCountsPerSecond = 0.0f;
+        m_SettlingStartedMs = nowMs;
+        m_SettlingStableSinceMs = nowMs;
+        m_SettlingLastLeft = leftCount;
+        m_SettlingLastRight = rightCount;
+        m_SettlingLastActivitySequence = activitySequence;
+        m_State = State::SETTLING;
+        return updateSettling(nowMs);
+    }
 
     if (leftCount < kWrongDirectionLimit || rightCount < kWrongDirectionLimit)
         return latchFault(Fault::WRONG_DIRECTION, nowMs);
@@ -235,16 +278,6 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
         return latchFault(Fault::WHEEL_MISMATCH, nowMs);
 
     updateVelocity(leftCount, rightCount, nowMs);
-
-    if (leftCount >= m_TargetCount && rightCount >= m_TargetCount)
-    {
-        forceSafeOutputs();
-        m_FinalElapsedMs = nowMs - m_MotionStartedMs;
-        m_VelocityCountsPerSecond = 0.0f;
-        m_State = State::COMPLETE;
-        return outputsSafe() ? UpdateResult::COMPLETE
-                             : latchFault(Fault::OUTPUT_INVARIANT, nowMs);
-    }
 
     if (nowMs - m_MotionStartedMs >= kMotionTimeoutMs)
         return latchFault(Fault::TIMEOUT, nowMs);
@@ -313,9 +346,68 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
     return UpdateResult::RUNNING;
 }
 
+MotionController::UpdateResult MotionController::updateSettling(uint32_t nowMs)
+{
+    // Settling is always de-energized. Reassert this invariant before reading
+    // encoders or evaluating any completion condition.
+    forceSafeOutputs();
+    if (!outputsSafe())
+        return latchFault(Fault::OUTPUT_INVARIANT, nowMs);
+
+    int32_t leftCount = 0;
+    int32_t rightCount = 0;
+    uint32_t activitySequence = 0;
+    readEncoderState(leftCount, rightCount, activitySequence);
+
+    if (leftCount < kWrongDirectionLimit || rightCount < kWrongDirectionLimit)
+        return latchFault(Fault::WRONG_DIRECTION, nowMs);
+
+    if (leftCount > m_TargetCount + kCountOverrunAllowance
+        || rightCount > m_TargetCount + kCountOverrunAllowance)
+    {
+        return latchFault(Fault::COUNT_OVERRUN, nowMs);
+    }
+
+    int64_t countDifference = static_cast<int64_t>(leftCount)
+                            - static_cast<int64_t>(rightCount);
+    if (countDifference < 0)
+        countDifference = -countDifference;
+    if (countDifference > kWheelMismatchLimit)
+        return latchFault(Fault::WHEEL_MISMATCH, nowMs);
+
+    const bool encoderChanged = activitySequence
+                                    != m_SettlingLastActivitySequence
+                             || leftCount != m_SettlingLastLeft
+                             || rightCount != m_SettlingLastRight;
+    if (encoderChanged)
+    {
+        m_SettlingLastLeft = leftCount;
+        m_SettlingLastRight = rightCount;
+        m_SettlingLastActivitySequence = activitySequence;
+        m_SettlingStableSinceMs = nowMs;
+    }
+
+    // Timeout wins if a delayed update observes both timeout and stability.
+    if (nowMs - m_SettlingStartedMs >= AppConfig::kEncoderSettleTimeoutMs)
+        return latchFault(Fault::SETTLING_TIMEOUT, nowMs);
+
+    if (leftCount >= m_TargetCount
+        && rightCount >= m_TargetCount
+        && nowMs - m_SettlingStableSinceMs
+               >= AppConfig::kEncoderSettleStableMs)
+    {
+        m_FinalElapsedMs = nowMs - m_MotionStartedMs;
+        m_VelocityCountsPerSecond = 0.0f;
+        m_State = State::COMPLETE;
+        return UpdateResult::COMPLETE;
+    }
+
+    return UpdateResult::SETTLING;
+}
+
 void MotionController::stopImmediately()
 {
-    if (m_State == State::RUNNING)
+    if (m_State == State::RUNNING || m_State == State::SETTLING)
     {
         const uint32_t nowMs = millis();
         forceSafeOutputs();
@@ -344,10 +436,12 @@ MotionController::Snapshot MotionController::snapshot() const
     result.leftPwm = m_LeftPwm;
     result.rightPwm = m_RightPwm;
     result.velocityCountsPerSecond = m_VelocityCountsPerSecond;
-    result.elapsedMs = m_State == State::RUNNING
+    result.elapsedMs = (m_State == State::RUNNING
+                        || m_State == State::SETTLING)
         ? millis() - m_MotionStartedMs
         : m_FinalElapsedMs;
     result.running = running();
+    result.settling = settling();
     result.completed = completed();
     result.faultLatched = faultLatched();
     result.outputsSafe = outputsSafe();
@@ -382,6 +476,11 @@ bool MotionController::outputsSafe() const
 bool MotionController::running() const
 {
     return m_State == State::RUNNING;
+}
+
+bool MotionController::settling() const
+{
+    return m_State == State::SETTLING;
 }
 
 bool MotionController::completed() const
@@ -443,7 +542,7 @@ MotionController::UpdateResult MotionController::latchFault(Fault cause,
                                                             uint32_t nowMs)
 {
     forceSafeOutputs();
-    if (m_State == State::RUNNING)
+    if (m_State == State::RUNNING || m_State == State::SETTLING)
         m_FinalElapsedMs = nowMs - m_MotionStartedMs;
     m_VelocityCountsPerSecond = 0.0f;
     if (m_Fault == Fault::NONE)
