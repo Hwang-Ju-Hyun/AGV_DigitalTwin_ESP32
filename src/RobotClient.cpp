@@ -2,6 +2,15 @@
 
 #include "Config.hpp"
 #include <Arduino.h>
+#include <lwip/sockets.h>
+
+namespace
+{
+    // Bound network work per application loop so encoder and safety checks
+    // cannot be starved by a burst of valid TCP data.
+    constexpr size_t kMaxRxBytesPerUpdate = 512;
+    constexpr size_t kMaxFramesPerUpdate = 4;
+}
 
 void RobotClient::begin(const char* ssid,
                         const char* password,
@@ -20,7 +29,7 @@ void RobotClient::begin(const char* ssid,
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     WiFi.begin(m_Ssid, m_Password);
-    Serial.printf("[WiFi] Connecting to %s\n", m_Ssid);
+    Serial.println("[WiFi] Connecting");
 }
 
 void RobotClient::update()
@@ -28,8 +37,20 @@ void RobotClient::update()
     connectIfNeeded(millis());
     if (!connected())
         return;
+
     readIncoming();
+    if (!connected())
+        return;
+
     processFrames();
+    if (!connected())
+        return;
+
+    if (m_SessionState == SessionState::WAIT_HELLO_ACK
+        && millis() - m_HelloSentAtMs >= AppConfig::kHelloAckTimeoutMs)
+    {
+        dropConnection("[RobotProtocol] HELLO_ACK timeout; reconnecting");
+    }
 }
 
 bool RobotClient::connected()
@@ -82,29 +103,33 @@ bool RobotClient::sendPong(uint32_t timestampMs)
     return sendPacket(RobotProtocol::PacketID::PONG, payload);
 }
 
+bool RobotClient::sendError(RobotProtocol::ErrorCode errorCode, uint32_t detail)
+{
+    RobotProtocol::ErrorPayload error;
+    error.errorCode = errorCode;
+    error.detail = detail;
+
+    std::vector<uint8_t> payload;
+    payload.reserve(6);
+    RobotProtocol::PacketWriter writer(payload);
+    RobotProtocol::writeErrorPayload(writer, error);
+    return sendPacket(RobotProtocol::PacketID::ERROR_PACKET, payload);
+}
+
 void RobotClient::connectIfNeeded(uint32_t nowMs)
 {
     if (WiFi.status() != WL_CONNECTED)
     {
-        if (m_Client.connected())
-            m_Client.stop();
-        if (m_WasConnected)
-            Serial.println("[TCP] Disconnected");
-        m_WasConnected = false;
-        m_Accepted = false;
+        if (m_SocketActive || m_Client.connected())
+            dropConnection("[TCP] Disconnected: Wi-Fi unavailable");
         return;
     }
 
     if (m_Client.connected())
-    {
-        m_WasConnected = true;
         return;
-    }
 
-    if (m_WasConnected)
-        Serial.println("[TCP] Disconnected");
-    m_WasConnected = false;
-    m_Accepted = false;
+    if (m_SocketActive)
+        dropConnection("[TCP] Disconnected");
 
     if (nowMs - m_LastReconnectAttemptMs < AppConfig::kReconnectIntervalMs)
         return;
@@ -120,31 +145,61 @@ void RobotClient::connectIfNeeded(uint32_t nowMs)
         return;
     }
 
-    m_WasConnected = true;
-    Serial.println("[TCP] Connected, sending HELLO");
+    m_SocketActive = true;
+    m_SessionState = SessionState::WAIT_HELLO_ACK;
+    Serial.println("[TCP] Connected");
     if (!sendHello())
-        Serial.println("[RobotProtocol] HELLO send failed");
+        return;
+
+    m_HelloSentAtMs = millis();
+    Serial.println("[RobotProtocol] HELLO sent; waiting for HELLO_ACK");
+}
+
+void RobotClient::dropConnection(const char* reason)
+{
+    const bool notify = m_SocketActive;
+
+    m_HelloSentAtMs = 0;
+    m_SessionState = SessionState::DISCONNECTED;
+    m_SocketActive = false;
+
+    // Stop motion before socket cleanup or potentially slow serial logging.
+    if (notify && onDisconnected)
+        onDisconnected();
+
+    m_Client.stop();
+    m_RxBuffer.clear();
+    m_AgvID = m_RequestedAgvID;
+
+    if (reason != nullptr)
+        Serial.println(reason);
 }
 
 void RobotClient::readIncoming()
 {
     uint8_t temp[128];
-    while (m_Client.available() > 0)
+    size_t remainingBudget = kMaxRxBytesPerUpdate;
+    while (m_Client.available() > 0 && remainingBudget > 0)
     {
         const int available = m_Client.available();
-        const size_t requestSize = available < static_cast<int>(sizeof(temp))
+        size_t requestSize = available < static_cast<int>(sizeof(temp))
             ? static_cast<size_t>(available)
             : sizeof(temp);
+        if (requestSize > remainingBudget)
+            requestSize = remainingBudget;
+
         const int count = m_Client.read(temp, requestSize);
         if (count <= 0)
+        {
+            if (!m_Client.connected() && m_SocketActive)
+                dropConnection("[TCP] Read failed; reconnecting");
             break;
+        }
         m_RxBuffer.insert(m_RxBuffer.end(), temp, temp + count);
+        remainingBudget -= static_cast<size_t>(count);
         if (m_RxBuffer.size() > RobotProtocol::kMaxFrameSize * 2U)
         {
-            Serial.println("[TCP] RX buffer limit exceeded; disconnecting");
-            m_RxBuffer.clear();
-            m_Client.stop();
-            m_Accepted = false;
+            dropConnection("[TCP] RX buffer limit exceeded; reconnecting");
             return;
         }
     }
@@ -152,16 +207,16 @@ void RobotClient::readIncoming()
 
 void RobotClient::processFrames()
 {
-    while (m_RxBuffer.size() >= RobotProtocol::kFrameHeaderSize)
+    size_t processedFrames = 0;
+    while (m_RxBuffer.size() >= RobotProtocol::kFrameHeaderSize
+           && processedFrames < kMaxFramesPerUpdate)
     {
         const uint16_t frameSize = RobotProtocol::readFrameSize(m_RxBuffer.data());
         const uint16_t minimumSize = RobotProtocol::kFrameHeaderSize + RobotProtocol::kPacketBodyHeaderSize;
         if (frameSize < minimumSize || frameSize > RobotProtocol::kMaxFrameSize)
         {
-            Serial.printf("[TCP] Invalid frame size: %u\n", frameSize);
-            m_RxBuffer.clear();
-            m_Client.stop();
-            m_Accepted = false;
+            dropConnection(nullptr);
+            Serial.printf("[TCP] Invalid frame size: %u; reconnecting\n", frameSize);
             return;
         }
         if (m_RxBuffer.size() < frameSize)
@@ -170,7 +225,10 @@ void RobotClient::processFrames()
         const uint8_t* body = m_RxBuffer.data() + RobotProtocol::kFrameHeaderSize;
         const size_t bodyLength = frameSize - RobotProtocol::kFrameHeaderSize;
         handleBody(body, bodyLength);
+        if (!connected())
+            return;
         m_RxBuffer.erase(m_RxBuffer.begin(), m_RxBuffer.begin() + frameSize);
+        ++processedFrames;
     }
 }
 
@@ -188,20 +246,28 @@ void RobotClient::handleBody(const uint8_t* body, size_t length)
     {
     case RobotProtocol::PacketID::HELLO_ACK:
     {
+        if (m_SessionState != SessionState::WAIT_HELLO_ACK)
+        {
+            Serial.println("[RobotProtocol] Unexpected HELLO_ACK ignored");
+            return;
+        }
+
         RobotProtocol::HelloAckPayload ack;
         if (!RobotProtocol::readHelloAckPayload(reader, ack))
         {
             Serial.println("[RobotProtocol] Invalid HELLO_ACK");
             return;
         }
-        m_Accepted = ack.accepted != 0 && ack.protocolVersion == RobotProtocol::kProtocolVersion;
+        const bool accepted = ack.accepted != 0
+            && ack.protocolVersion == RobotProtocol::kProtocolVersion;
+        m_SessionState = accepted ? SessionState::ACCEPTED : SessionState::REJECTED;
         if (ack.assignedAgvID != 0)
             m_AgvID = ack.assignedAgvID;
         Serial.printf("[RobotProtocol] HELLO_ACK accepted=%u agvID=%lu error=%u\n",
-                      m_Accepted ? 1U : 0U,
+                      accepted ? 1U : 0U,
                       static_cast<unsigned long>(m_AgvID),
                       static_cast<unsigned>(ack.errorCode));
-        if (m_Accepted && onAccepted)
+        if (accepted && onAccepted)
             onAccepted(m_AgvID);
         break;
     }
@@ -243,24 +309,38 @@ void RobotClient::handleBody(const uint8_t* body, size_t length)
 
 bool RobotClient::sendPacket(RobotProtocol::PacketID packetID, const std::vector<uint8_t>& payload)
 {
-    if (!connected())
+    if (!m_SocketActive || !connected())
+    {
+        if (m_SocketActive)
+            dropConnection("[TCP] Send attempted on a closed socket; reconnecting");
         return false;
+    }
 
     std::vector<uint8_t> frame;
     if (!RobotProtocol::buildFrame(packetID, m_AgvID, m_NextSequence++, payload, frame))
-        return false;
-
-    size_t offset = 0;
-    const uint32_t startedAt = millis();
-    while (offset < frame.size() && connected() && millis() - startedAt < 1000)
     {
-        const size_t written = m_Client.write(frame.data() + offset, frame.size() - offset);
-        if (written == 0)
-        {
-            delay(1);
-            continue;
-        }
-        offset += written;
+        dropConnection("[RobotProtocol] Frame build failed; reconnecting");
+        return false;
     }
-    return offset == frame.size();
+
+    const int socketFd = m_Client.fd();
+    if (socketFd < 0)
+    {
+        dropConnection("[TCP] Invalid socket during send; reconnecting");
+        return false;
+    }
+
+    // Frames are at most 2 KiB. One non-blocking write avoids holding the
+    // application loop while motor safety and encoder checks need service.
+    const int written = ::send(socketFd,
+                               frame.data(),
+                               frame.size(),
+                               MSG_DONTWAIT);
+    if (written == static_cast<int>(frame.size()))
+        return true;
+
+    // A partial frame cannot be retried safely while preserving a bounded
+    // safety loop, so close this TCP stream and start a clean session.
+    dropConnection("[TCP] Packet write incomplete; reconnecting");
+    return false;
 }

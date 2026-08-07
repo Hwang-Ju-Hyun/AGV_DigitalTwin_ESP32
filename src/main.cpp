@@ -2,148 +2,65 @@
 #include <cstring>
 
 #include "Config.hpp"
+#include "MotionController.hpp"
 #include "RobotClient.hpp"
+#include "RouteExecutor.hpp"
 
 static_assert(!AppConfig::kEnableMotorOutputs,
-              "PHASE 2A SAFETY FAILURE: motor outputs must remain disabled");
+              "PHASE 2B SAFETY FAILURE: motor outputs must remain disabled");
 
 namespace
 {
-    enum class DemoState : uint8_t
-    {
-        DISARMED_NO_ROUTE,
-        WAIT_BOOT,
-        COUNTDOWN,
-        DRY_RUN_APPROVED,
-        FAULT_LATCHED,
-        ESTOP_LATCHED
-    };
-
     RobotClient robotClient;
-    RobotProtocol::RouteCommandPayload pendingRoute;
+    MotionController motionController;
+    RouteExecutor routeExecutor(motionController);
 
-    DemoState demoState = DemoState::DISARMED_NO_ROUTE;
     bool networkConfigured = false;
-    bool routePending = false;
-    bool previousTcpConnected = false;
-    uint32_t countdownStartedMs = 0;
     uint32_t lastStatusMs = 0;
     uint32_t lastStatusLogMs = 0;
+    bool faultReported = false;
+    uint32_t lastFaultDetail = 0;
+    RouteExecutor::State lastLoggedState =
+        RouteExecutor::State::DISARMED_NO_ROUTE;
 
     bool lastButtonReading = HIGH;
     bool stableButtonState = HIGH;
     bool buttonArmed = true;
     uint32_t lastButtonChangeMs = 0;
 
-    const char* stateName(DemoState state)
+    bool sessionReady()
     {
-        switch (state)
-        {
-        case DemoState::DISARMED_NO_ROUTE: return "DISARMED_NO_ROUTE";
-        case DemoState::WAIT_BOOT:         return "WAIT_BOOT";
-        case DemoState::COUNTDOWN:         return "COUNTDOWN";
-        case DemoState::DRY_RUN_APPROVED:  return "DRY_RUN_APPROVED";
-        case DemoState::FAULT_LATCHED:     return "FAULT_LATCHED";
-        case DemoState::ESTOP_LATCHED:     return "ESTOP_LATCHED";
-        default:                           return "UNKNOWN";
-        }
-    }
-
-    void forceMotorSafe()
-    {
-        ledcWrite(AppConfig::kLeftPwmChannel, 0);
-        ledcWrite(AppConfig::kRightPwmChannel, 0);
-
-        digitalWrite(AppConfig::kLeftMotorIn1Pin, LOW);
-        digitalWrite(AppConfig::kLeftMotorIn2Pin, LOW);
-        digitalWrite(AppConfig::kRightMotorIn1Pin, LOW);
-        digitalWrite(AppConfig::kRightMotorIn2Pin, LOW);
-        digitalWrite(AppConfig::kMotorStandbyPin, LOW);
-    }
-
-    void initializeSafetyHardware()
-    {
-        // STBY is forced LOW before Serial, Wi-Fi, or any route handling starts.
-        pinMode(AppConfig::kMotorStandbyPin, OUTPUT);
-        digitalWrite(AppConfig::kMotorStandbyPin, LOW);
-
-        pinMode(AppConfig::kLeftMotorIn1Pin, OUTPUT);
-        pinMode(AppConfig::kLeftMotorIn2Pin, OUTPUT);
-        pinMode(AppConfig::kRightMotorIn1Pin, OUTPUT);
-        pinMode(AppConfig::kRightMotorIn2Pin, OUTPUT);
-
-        ledcSetup(AppConfig::kLeftPwmChannel,
-                  AppConfig::kPwmFrequency,
-                  AppConfig::kPwmResolutionBits);
-        ledcSetup(AppConfig::kRightPwmChannel,
-                  AppConfig::kPwmFrequency,
-                  AppConfig::kPwmResolutionBits);
-        ledcAttachPin(AppConfig::kLeftMotorPwmPin, AppConfig::kLeftPwmChannel);
-        ledcAttachPin(AppConfig::kRightMotorPwmPin, AppConfig::kRightPwmChannel);
-
-        pinMode(AppConfig::kBootButtonPin, INPUT_PULLUP);
-        const bool initialButtonState = digitalRead(AppConfig::kBootButtonPin);
-        lastButtonReading = initialButtonState;
-        stableButtonState = initialButtonState;
-        buttonArmed = initialButtonState == HIGH;
-        lastButtonChangeMs = millis();
-
-        forceMotorSafe();
+        return robotClient.connected() && robotClient.accepted();
     }
 
     bool credentialsAreConfigured()
     {
         return std::strcmp(AppConfig::kWifiSsid, "CHANGE_ME_WIFI_SSID") != 0
-            && std::strcmp(AppConfig::kWifiPassword, "CHANGE_ME_WIFI_PASSWORD") != 0;
+            && std::strcmp(AppConfig::kWifiPassword,
+                           "CHANGE_ME_WIFI_PASSWORD") != 0;
     }
 
-    bool isExactDemoRoute(const RobotProtocol::RouteCommandPayload& route)
+    void initializeBootButton()
     {
-        return route.routeID != 0
-            && route.nodeCount == 2
-            && route.nodes[0].nodeID == AppConfig::kDemoStartNodeID
-            && route.nodes[1].nodeID == AppConfig::kDemoTargetNodeID;
+        pinMode(AppConfig::kBootButtonPin, INPUT_PULLUP);
+        const bool initialState = digitalRead(AppConfig::kBootButtonPin);
+        lastButtonReading = initialState;
+        stableButtonState = initialState;
+        buttonArmed = initialState == HIGH;
+        lastButtonChangeMs = millis();
     }
 
-    bool sameNodeSequence(const RobotProtocol::RouteCommandPayload& left,
-                          const RobotProtocol::RouteCommandPayload& right)
-    {
-        if (left.nodeCount != right.nodeCount)
-            return false;
-
-        for (uint16_t i = 0; i < left.nodeCount; ++i)
-        {
-            if (left.nodes[i].nodeID != right.nodes[i].nodeID)
-                return false;
-        }
-        return true;
-    }
-
-    void printRoute(const RobotProtocol::RouteCommandPayload& route)
-    {
-        Serial.printf("[ROUTE] routeID=%lu nodeCount=%u\n",
-                      static_cast<unsigned long>(route.routeID), route.nodeCount);
-        for (uint16_t i = 0; i < route.nodeCount; ++i)
-        {
-            Serial.printf("  node[%u]=%lu arrival=%.3f departure=%.3f\n",
-                          i,
-                          static_cast<unsigned long>(route.nodes[i].nodeID),
-                          route.nodes[i].arrivalTime,
-                          route.nodes[i].departureTime);
-        }
-    }
-
-    bool bootButtonPressed()
+    bool bootButtonPressed(uint32_t nowMs)
     {
         const bool reading = digitalRead(AppConfig::kBootButtonPin);
 
         if (reading != lastButtonReading)
         {
             lastButtonReading = reading;
-            lastButtonChangeMs = millis();
+            lastButtonChangeMs = nowMs;
         }
 
-        if (millis() - lastButtonChangeMs < AppConfig::kButtonDebounceMs)
+        if (nowMs - lastButtonChangeMs < AppConfig::kButtonDebounceMs)
             return false;
 
         if (reading == stableButtonState)
@@ -163,49 +80,83 @@ namespace
         return true;
     }
 
-    void clearPendingRoute(const char* reason)
+    void printRoute(const RobotProtocol::RouteCommandPayload& route,
+                    bool includeNodeDetails)
     {
-        forceMotorSafe();
-        routePending = false;
-        std::memset(&pendingRoute, 0, sizeof(pendingRoute));
-        if (demoState != DemoState::FAULT_LATCHED
-            && demoState != DemoState::ESTOP_LATCHED
-            && demoState != DemoState::DRY_RUN_APPROVED)
+        Serial.printf("[ROUTE] routeID=%lu nodeCount=%u\n",
+                      static_cast<unsigned long>(route.routeID),
+                      route.nodeCount);
+
+        // Only the newly stored two-node demo route needs detailed logging.
+        // Invalid, duplicate, or in-motion packets cannot create a long Serial
+        // burst that delays encoder and fault servicing.
+        if (!includeNodeDetails)
+            return;
+
+        for (uint16_t i = 0; i < route.nodeCount; ++i)
         {
-            demoState = DemoState::DISARMED_NO_ROUTE;
+            Serial.printf("  node[%u]=%lu arrival=%.3f departure=%.3f\n",
+                          i,
+                          static_cast<unsigned long>(route.nodes[i].nodeID),
+                          route.nodes[i].arrivalTime,
+                          route.nodes[i].departureTime);
         }
-        Serial.printf("[SAFE] %s | STBY=LOW PWM=0\n", reason);
     }
 
-    void handleBootApproval()
+    void printStateTransition(RouteExecutor::State state)
     {
-        if (demoState == DemoState::WAIT_BOOT)
-        {
-            if (!routePending || !robotClient.connected() || !robotClient.accepted())
-            {
-                clearPendingRoute("BOOT REJECTED: ROUTE OR SERVER NOT READY");
-                return;
-            }
-
-            countdownStartedMs = millis();
-            demoState = DemoState::COUNTDOWN;
-            Serial.println();
-            Serial.println("================================");
-            Serial.println("BOOT APPROVAL RECEIVED");
-            Serial.println("5 SECOND SAFETY COUNTDOWN");
-            Serial.println("DRY RUN: MOTORS WILL NOT MOVE");
-            Serial.println("PRESS BOOT AGAIN TO CANCEL");
-            Serial.println("================================");
+        if (state == lastLoggedState)
             return;
-        }
 
-        if (demoState == DemoState::COUNTDOWN)
+        lastLoggedState = state;
+        const MotionController::Snapshot snapshot = motionController.snapshot();
+        Serial.printf("[EXECUTOR] state=%s | L=%ld R=%ld | PWM=%d/%d | safe=%u\n",
+                      RouteExecutor::stateName(state),
+                      static_cast<long>(snapshot.leftCount),
+                      static_cast<long>(snapshot.rightCount),
+                      snapshot.leftPwm,
+                      snapshot.rightPwm,
+                      snapshot.outputsSafe ? 1U : 0U);
+
+        switch (state)
         {
-            clearPendingRoute("USER CANCELLED DURING COUNTDOWN");
-            return;
+        case RouteExecutor::State::WAIT_BOOT:
+            Serial.println("[SAFE] Exact [1 -> 2] stored; press BOOT once");
+            break;
+        case RouteExecutor::State::COUNTDOWN:
+            Serial.println("[SAFE] 5 second countdown; press BOOT again to cancel");
+            break;
+        case RouteExecutor::State::RUNNING:
+            Serial.println("[MOTION] 30 cm encoder drive started; target=520");
+            break;
+        case RouteExecutor::State::ARRIVAL_PENDING:
+            Serial.println("[MOTION] Target reached and outputs verified safe");
+            break;
+        case RouteExecutor::State::ARRIVAL_REPORTED:
+            Serial.println("[RobotProtocol] ARRIVED sent; run latched complete");
+            break;
+        case RouteExecutor::State::OUTPUT_LOCKED:
+            Serial.println("[SAFE] Motor compile lock blocked physical start");
+            Serial.println("[SAFE] STBY=LOW PWM=0; ARRIVED remains blocked");
+            break;
+        case RouteExecutor::State::FAULT_LATCHED:
+            Serial.printf("[FAULT] %s detail=%lu; reboot required\n",
+                          RouteExecutor::faultName(routeExecutor.fault()),
+                          static_cast<unsigned long>(routeExecutor.faultDetail()));
+            break;
+        case RouteExecutor::State::ESTOP_LATCHED:
+            Serial.println("[SAFE] EMERGENCY_STOP latched; reboot required");
+            break;
+        default:
+            break;
         }
+    }
 
-        Serial.printf("[BOOT] Ignored in state=%s\n", stateName(demoState));
+    void handleBootPress(uint32_t nowMs)
+    {
+        const RouteExecutor::BootResult result =
+            routeExecutor.handleBootPress(nowMs, sessionReady());
+        Serial.printf("[BOOT] %s\n", RouteExecutor::bootResultName(result));
     }
 
     void configureCallbacks()
@@ -217,150 +168,143 @@ namespace
             Serial.println("[SAFE] MOTOR OUTPUTS REMAIN COMPILE-LOCKED OFF");
         };
 
-        robotClient.onRouteCommand = [](const RobotProtocol::RouteCommandPayload& route)
+        robotClient.onDisconnected = []()
         {
-            forceMotorSafe();
-            printRoute(route);
+            // RobotClient invokes this before closing/clearing its socket.
+            routeExecutor.onNetworkLost();
+        };
 
-            if (!isExactDemoRoute(route))
-            {
-                Serial.println("[SAFE] ROUTE REJECTED: ONLY EXACT [1 -> 2] IS ALLOWED");
-                Serial.println("[SAFE] STBY=LOW PWM=0");
-                return;
-            }
+        robotClient.onRouteCommand = [](
+            const RobotProtocol::RouteCommandPayload& route)
+        {
+            const RouteExecutor::RouteResult result =
+                routeExecutor.acceptRoute(route, sessionReady());
+            printRoute(route, result == RouteExecutor::RouteResult::STORED);
+            Serial.printf("[ROUTE] result=%s\n",
+                          RouteExecutor::routeResultName(result));
 
-            if (demoState == DemoState::FAULT_LATCHED
-                || demoState == DemoState::ESTOP_LATCHED
-                || demoState == DemoState::DRY_RUN_APPROVED)
-            {
-                Serial.printf("[SAFE] ROUTE REJECTED: STATE IS LATCHED (%s)\n",
-                              stateName(demoState));
-                return;
-            }
-
-            if (routePending)
-            {
-                if (sameNodeSequence(pendingRoute, route))
-                    Serial.println("[SAFE] DUPLICATE [1 -> 2] IGNORED; NO RESTART");
-                else
-                    Serial.println("[SAFE] NEW ROUTE REJECTED WHILE ONE IS PENDING");
-                return;
-            }
-
-            if (!robotClient.accepted())
-            {
-                Serial.println("[SAFE] ROUTE REJECTED: SERVER SESSION NOT ACCEPTED");
-                return;
-            }
-
-            pendingRoute = route;
-            routePending = true;
-            demoState = DemoState::WAIT_BOOT;
-            Serial.println("[SAFE] EXACT [1 -> 2] ROUTE STORED");
-            Serial.println("[SAFE] WAITING FOR LOCAL BOOT APPROVAL");
-            Serial.println("[SAFE] STBY=LOW PWM=0");
+            if (result == RouteExecutor::RouteResult::REJECTED_INVALID_ROUTE)
+                Serial.println("[SAFE] Only exact [1 -> 2] is allowed");
+            else if (result != RouteExecutor::RouteResult::STORED
+                     && result != RouteExecutor::RouteResult::DUPLICATE_IGNORED)
+                Serial.println("[SAFE] Route not executable in current state");
         };
 
         robotClient.onCancelRoute = []()
         {
-            clearPendingRoute("SERVER CANCEL_ROUTE RECEIVED");
+            routeExecutor.cancelRoute();
+            Serial.println("[SAFE] CANCEL_ROUTE handled; outputs forced safe");
         };
 
         robotClient.onEmergencyStop = []()
         {
-            forceMotorSafe();
-            routePending = false;
-            demoState = DemoState::ESTOP_LATCHED;
-            Serial.println("[SAFE] EMERGENCY STOP LATCHED");
-            Serial.println("[SAFE] REBOOT REQUIRED; STBY=LOW PWM=0");
+            routeExecutor.emergencyStop();
+            Serial.println("[SAFE] EMERGENCY_STOP handled immediately");
         };
     }
 
-    void updateDryRunState(uint32_t nowMs)
+    void reportFaultIfNeeded()
     {
-        if (demoState != DemoState::COUNTDOWN)
-            return;
-
-        if (!routePending || !robotClient.connected() || !robotClient.accepted())
+        if (routeExecutor.state() != RouteExecutor::State::FAULT_LATCHED)
         {
-            clearPendingRoute("COUNTDOWN ABORTED: TCP OR ROUTE LOST");
+            faultReported = false;
+            lastFaultDetail = 0;
             return;
         }
 
-        if (nowMs - countdownStartedMs < AppConfig::kApprovalCountdownMs)
-            return;
+        const uint32_t detail = routeExecutor.faultDetail();
+        if (detail != lastFaultDetail)
+        {
+            lastFaultDetail = detail;
+            faultReported = false;
+        }
 
-        forceMotorSafe();
-        demoState = DemoState::DRY_RUN_APPROVED;
-        Serial.println();
-        Serial.println("================================");
-        Serial.println("PHASE 2A DRY RUN PASSED");
-        Serial.println("BOOT APPROVAL RECEIVED");
-        Serial.println("DRY RUN ONLY - NO MOTION");
-        Serial.println("STBY=LOW PWM=0");
-        Serial.println("ARRIVED BLOCKED");
-        Serial.println("POWER CYCLE REQUIRED FOR ANOTHER RUN");
-        Serial.println("================================");
+        if (!faultReported && sessionReady())
+        {
+            faultReported = robotClient.sendError(
+                RobotProtocol::ErrorCode::MOTOR_FAULT,
+                detail);
+            if (faultReported)
+                Serial.println("[RobotProtocol] Fault ERROR_PACKET sent");
+        }
     }
 
-    void sendSafeStatus(uint32_t nowMs)
+    void sendArrivalIfReady()
     {
-        if (!robotClient.accepted()
+        uint32_t arrivedNode = 0;
+        if (!routeExecutor.arrivalPending(arrivedNode) || !sessionReady())
+            return;
+
+        // Publish the final encoder-derived pose before ARRIVED. Any failed
+        // write closes the session, whose callback stops/latches the executor.
+        if (!robotClient.sendStatus(routeExecutor.buildStatus()))
+        {
+            routeExecutor.markArrivedSendResult(false);
+            return;
+        }
+
+        const bool sent = robotClient.sendArrived(arrivedNode);
+        routeExecutor.markArrivedSendResult(sent);
+    }
+
+    void sendStatusIfDue(uint32_t nowMs)
+    {
+        if (!sessionReady()
             || nowMs - lastStatusMs < AppConfig::kStatusIntervalMs)
         {
             return;
         }
 
         lastStatusMs = nowMs;
-        RobotProtocol::StatusPayload status;
-        status.currentNodeID = AppConfig::kDemoStartNodeID;
-        status.currentLinkID = 0;
-        status.progress = 0.0f;
-        status.x = 0.0f;
-        status.z = 0.0f;
-        status.heading = 0.0f;
-        status.velocity = 0.0f;
-        status.battery = 100.0f; // Placeholder; battery is physically removed.
-        status.state = demoState == DemoState::ESTOP_LATCHED
-            ? RobotProtocol::RobotState::EMERGENCY_STOPPED
-            : (demoState == DemoState::FAULT_LATCHED
-                ? RobotProtocol::RobotState::FAULT
-                : RobotProtocol::RobotState::IDLE);
-
+        const RobotProtocol::StatusPayload status = routeExecutor.buildStatus();
         if (!robotClient.sendStatus(status))
-            Serial.println("[STATUS] Send failed");
+            return;
 
-        if (nowMs - lastStatusLogMs >= AppConfig::kStatusLogIntervalMs)
-        {
-            lastStatusLogMs = nowMs;
-            Serial.printf("[STATUS] node=1 IDLE | state=%s | pending=%u | STBY=LOW PWM=0\n",
-                          stateName(demoState), routePending ? 1U : 0U);
-        }
+        if (nowMs - lastStatusLogMs < AppConfig::kStatusLogIntervalMs)
+            return;
+
+        lastStatusLogMs = nowMs;
+        const MotionController::Snapshot snapshot = motionController.snapshot();
+        Serial.printf(
+            "[STATUS] node=%lu target=%lu progress=%.3f state=%s "
+            "L=%ld R=%ld PWM=%d/%d STBY=%s\n",
+            static_cast<unsigned long>(status.currentNodeID),
+            static_cast<unsigned long>(status.currentLinkID),
+            status.progress,
+            RouteExecutor::stateName(routeExecutor.state()),
+            static_cast<long>(snapshot.leftCount),
+            static_cast<long>(snapshot.rightCount),
+            snapshot.leftPwm,
+            snapshot.rightPwm,
+            digitalRead(AppConfig::kMotorStandbyPin) == LOW ? "LOW" : "HIGH");
     }
 }
 
 void setup()
 {
-    initializeSafetyHardware();
+    // Motor/encoder hardware enters the safe state before Serial or Wi-Fi.
+    routeExecutor.begin();
+    initializeBootButton();
 
     Serial.begin(AppConfig::kSerialBaud);
     delay(300);
 
     Serial.println();
     Serial.println("================================");
-    Serial.println("PHASE 2A: SERVER ROUTE + BOOT DRY RUN");
+    Serial.println("PHASE 2B: 30CM EXECUTOR INTEGRATION");
     Serial.println("ACCEPTED ROUTE: EXACT [1 -> 2] ONLY");
+    Serial.println("MOTION TARGET: 520 ENCODER COUNTS");
     Serial.println("MOTOR OUTPUTS: COMPILE-LOCKED OFF");
     Serial.println("TB6612 STBY: LOW");
-    Serial.println("ARRIVED TRANSMISSION: BLOCKED");
-    Serial.println("BATTERY AND VM MUST STAY DISCONNECTED");
+    Serial.println("ARRIVED: SAFE-COMPLETION GATED");
+    Serial.println("UPLOAD/POWERED TEST NOT PERFORMED");
     Serial.println("================================");
 
     configureCallbacks();
     networkConfigured = credentialsAreConfigured();
     if (!networkConfigured)
     {
-        Serial.println("[CONFIG] Fill include/Secrets.hpp, then upload again");
+        Serial.println("[CONFIG] Configure local Secrets.hpp, then upload again");
         return;
     }
 
@@ -373,34 +317,42 @@ void setup()
 
 void loop()
 {
-    // Phase 2A invariant: every pass through loop drives all motor outputs safe.
-    forceMotorSafe();
+    const uint32_t nowMs = millis();
 
-    if (bootButtonPressed())
-        handleBootApproval();
+    // With the current lock this is also a continuous runtime invariant.
+    if (!AppConfig::kEnableMotorOutputs)
+        motionController.stopImmediately();
+
+    // If the socket is already known down, stop before reconnect processing.
+    if (routeExecutor.hasRoute() && !sessionReady())
+        routeExecutor.onNetworkLost();
+
+    if (bootButtonPressed(nowMs))
+        handleBootPress(nowMs);
+
+    // Encoder, timeout, stall and immediate motion safety are serviced before
+    // any potentially variable-duration TCP work.
+    routeExecutor.update(nowMs, sessionReady());
 
     if (networkConfigured)
-    {
         robotClient.update();
-        forceMotorSafe();
 
-        const bool tcpConnected = robotClient.connected();
-        if (previousTcpConnected && !tcpConnected)
-        {
-            if (demoState != DemoState::DRY_RUN_APPROVED
-                && demoState != DemoState::FAULT_LATCHED
-                && demoState != DemoState::ESTOP_LATCHED)
-            {
-                clearPendingRoute("TCP LOST: ROUTE CLEARED");
-            }
-        }
-        previousTcpConnected = tcpConnected;
+    // RobotClient also invokes onDisconnected before socket cleanup. This
+    // second check covers a state change discovered during update().
+    if (routeExecutor.hasRoute() && !sessionReady())
+        routeExecutor.onNetworkLost();
 
-        const uint32_t nowMs = millis();
-        updateDryRunState(nowMs);
-        sendSafeStatus(nowMs);
+    printStateTransition(routeExecutor.state());
+
+    if (networkConfigured && sessionReady())
+    {
+        reportFaultIfNeeded();
+        sendArrivalIfReady();
+        sendStatusIfDue(millis());
     }
 
-    forceMotorSafe();
+    if (!AppConfig::kEnableMotorOutputs)
+        motionController.stopImmediately();
+
     delay(2);
 }
