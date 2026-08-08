@@ -3,6 +3,21 @@
 #include <Arduino.h>
 #include "Secrets.hpp"
 
+#if !defined(AGV_RAISED_WHEEL_BUILD) \
+    || !defined(AGV_MOTOR_OUTPUTS_ENABLED)
+#error "Select an explicit PlatformIO motor-safety build profile"
+#endif
+
+#if (AGV_RAISED_WHEEL_BUILD != 0 && AGV_RAISED_WHEEL_BUILD != 1) \
+    || (AGV_MOTOR_OUTPUTS_ENABLED != 0 \
+        && AGV_MOTOR_OUTPUTS_ENABLED != 1)
+#error "Motor-safety build profile values must be 0 or 1"
+#endif
+
+#if AGV_RAISED_WHEEL_BUILD != AGV_MOTOR_OUTPUTS_ENABLED
+#error "Raised-wheel profile and motor-output selection disagree"
+#endif
+
 namespace AppConfig
 {
     static constexpr const char* kWifiSsid = LocalSecrets::kWifiSsid;
@@ -19,9 +34,11 @@ namespace AppConfig
     static constexpr uint32_t kReconnectIntervalMs = 2000;
     static constexpr uint32_t kHelloAckTimeoutMs = 3000;
 
-    // Phase 2B integration is build-only. Physical output activation requires
-    // a separate, explicitly approved safety review and powered test.
-    static constexpr bool kEnableMotorOutputs = false;
+    // Only the explicit esp32dev-raised-wheel environment sets both values to
+    // true. The default esp32dev environment keeps both compile-time locks off.
+    static constexpr bool kRaisedWheelBuild = AGV_RAISED_WHEEL_BUILD != 0;
+    static constexpr bool kEnableMotorOutputs =
+        AGV_MOTOR_OUTPUTS_ENABLED != 0;
 
     // Only this exact two-node route is accepted in the first physical demo.
     // The current server protocol carries no metric distance, so [1 -> 2]

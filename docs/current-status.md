@@ -1,12 +1,13 @@
 # ESP32Test Current Status
 
-Last reviewed: 2026-08-07
+Last reviewed: 2026-08-08
 
 ## Repository baseline
 
 - This directory is the existing PlatformIO project for the physical ESP32 AGV.
 - The M4 safety-hardening work started from commit `1b3b80f924ce99e1fe3f9d9de19884e92be7e0fb` on branch `agent/phase2b-motor-locked-integration`.
-- This status records both the previously hardware-checked motor-disabled Phase 2B path and the newer build-only M4 safety changes.
+- Phase 2C raised-wheel preparation starts from commit `ef2d4f2d21e2768b06a63013c079de4e3a5dafb8` on branch `agent/phase2c-raised-wheel-test`.
+- This status records the previously hardware-checked motor-disabled Phase 2B path plus the build-only M4 and Phase 2C changes.
 - PlatformIO output, temporary build directories, IDE-local files, and the real credential file remain excluded by `.gitignore`.
 - `include/Secrets.hpp` is local-only and must never be displayed, staged, committed, or pushed.
 
@@ -44,6 +45,18 @@ The active source now contains these additional safety gates, but this M4 build 
 - Completion requires both counts to remain at or above target with no encoder activity for at least 150 ms. A 2,000 ms settling limit, wrong direction, count overrun, wheel mismatch, or unsafe output invariant latches a fault.
 - `STATUS` remains on node 1 during `SETTLING`; node 2 and `ARRIVED` remain blocked until settling completes and safe outputs are verified.
 
+## Phase 2C raised-wheel build preparation (build-only)
+
+PlatformIO now exposes two explicit compile-time safety profiles:
+
+- `esp32dev` is the default environment. Both the raised-wheel flag and motor-output flag are `0`, so motor output remains compile-locked off.
+- `esp32dev-raised-wheel` is the only environment where both flags are `1`, allowing the existing guarded motion path to energize the TB6612 after route acceptance, local BOOT approval, and the five-second countdown.
+- Missing, non-binary, or mismatched profile flags stop compilation. Profile-specific `static_assert` checks independently verify the locked and raised-wheel builds.
+- The raised-wheel boot banner explicitly reports `MOTOR OUTPUTS: ENABLED` and warns that the wheels must remain off the floor. The default banner explicitly reports the motor lock.
+- MotionController, RouteExecutor, RobotProtocol, GPIO, encoder polarity, 520-count target, PWM profile, BOOT behavior, fault gates, settling, and ARRIVED gating are unchanged from `ef2d4f2`.
+
+Both profiles have only been compiled. Neither Phase 2C binary has been uploaded or run on hardware.
+
 ## Firmware currently built
 
 The active PlatformIO firmware is now split into these responsibilities:
@@ -53,6 +66,7 @@ The active PlatformIO firmware is now split into these responsibilities:
 - `src/MotionController.cpp`: encoder interrupts, the verified 30 cm forward profile, synchronization, immediate motion safety, and encoder-stability settling.
 - `src/RouteExecutor.cpp`: exact-route validation, BOOT/countdown/E-stop gating, running/settling state, fault latch, progress STATUS, and ARRIVED gating.
 - `src/main.cpp`: callback wiring and a non-blocking safety/network loop; it does not duplicate the verified motor algorithm.
+- `platformio.ini`: selects the default motor-locked build or the explicit raised-wheel-only build profile.
 
 The only accepted physical-demo interpretation remains:
 
@@ -67,12 +81,13 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 ## Safety state and invariants
 
-- `AppConfig::kEnableMotorOutputs` remains `false`.
-- `src/main.cpp` retains a `static_assert` that intentionally fails the build if that lock is changed without revisiting the integration build.
-- With the lock false, the start path returns `OUTPUT_DISABLED` before any HIGH direction/STBY command or nonzero PWM command is reachable.
+- The default `esp32dev` environment compiles `AppConfig::kEnableMotorOutputs=false` and remains the safe target for a bare `platformio run`.
+- Only `esp32dev-raised-wheel` compiles `AppConfig::kEnableMotorOutputs=true`; it is clearly marked as raised-wheel-only and is not a floor-driving profile.
+- `src/main.cpp` retains compile-time assertions for both profiles, and `Config.hpp` rejects missing, invalid, or mismatched profile flags.
+- In the default environment, the start path returns `OUTPUT_DISABLED` before any HIGH direction/STBY command or nonzero PWM command is reachable.
 - Motor hardware is initialized with `STBY=LOW`, PWM zero, and all direction pins low before Serial or Wi-Fi starts.
-- The current build reaches `OUTPUT_LOCKED` after a valid route, BOOT approval, and countdown. It does not move and does not send `ARRIVED`.
-- A future enabled run can enter motion only after an accepted exact route, a live accepted session, one local BOOT press, and the five-second countdown.
+- The default build reaches `OUTPUT_LOCKED` after a valid route, BOOT approval, and countdown. It does not move and does not send `ARRIVED`.
+- The raised-wheel build can enter motion only after an accepted exact route, a live accepted session, one local BOOT press, and the five-second countdown.
 - Countdown cancellation preserves the accepted route and returns to `WAIT_BOOT`; Server `CANCEL_ROUTE` remains the operation that removes the stored route.
 - BOOT during `RUNNING`, `SETTLING`, or `ARRIVAL_PENDING` is a local emergency stop and latches until reboot.
 - This BOOT action is a debounced firmware stop, not a hardware-rated emergency-stop circuit; it does not replace a physical power-cut switch.
@@ -109,9 +124,11 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 ## Build validation
 
-- `platformio run` for `esp32dev` succeeded on 2026-08-07 after the M4 changes.
-- Reported use was 46,360 bytes of RAM (14.1%) and 774,365 bytes of flash (59.1%).
-- This M4 validation was build-only. No upload, Serial monitor, battery connection, motor output activation, or powered movement was performed.
+- `platformio run -e esp32dev` succeeded on 2026-08-08.
+  Reported use was 46,360 bytes of RAM (14.1%) and 774,445 bytes of flash (59.1%).
+- `platformio run -e esp32dev-raised-wheel` succeeded on 2026-08-08.
+  Reported use was 46,360 bytes of RAM (14.1%) and 775,345 bytes of flash (59.2%).
+- Phase 2C validation was build-only. No upload, Serial monitor, battery connection, motor activation, or powered movement was performed.
 - The earlier motor-locked hardware check described above remains the latest physical firmware verification.
 
 ## Explicitly not yet verified
@@ -119,6 +136,7 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 - The 3-second stale-HELLO reconnect behavior on the live Windows/WSL path
 - Explicit socket cleanup after a failed `WiFiClient.connect()` attempt; this path is unchanged in the reduced M4 scope
 - M4 countdown-retain, BOOT E-stop, settling stability, and settling-timeout behavior on actual ESP32 hardware
+- The `esp32dev-raised-wheel` boot banner and actual 520-count raised-wheel motion path on hardware
 - Encoder progress STATUS received and visualized by Server/Unity
 - Powered 30 cm motion from a Server `[1 -> 2]` command
 - Every fault input on raised wheels, including stall, reversed count, mismatch, timeout, TCP loss, and E-stop
@@ -128,4 +146,4 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 ## Next safe step
 
-Keep motor outputs locked. First perform a separately approved, motor-power-isolated upload/Serial check of the new countdown-cancel and BOOT-result state transitions. Before physical activation, prepare a raised-wheel test plan for BOOT E-stop, settling, disconnect, stall, reversed count, mismatch, timeout, safe completion, and exactly-once `ARRIVED`. Half-open session policy and changing the compile lock remain later, explicit decisions.
+Keep using the default motor-locked environment unless a raised-wheel test is explicitly approved. Before uploading `esp32dev-raised-wheel`, confirm the wheels are mechanically clear of the floor, the vehicle cannot fall or drive away, the power wiring is secure, and a physical power-disconnect is immediately reachable. Upload and powered testing remain separate user-controlled steps. Half-open session policy remains a later decision.

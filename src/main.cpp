@@ -6,8 +6,19 @@
 #include "RobotClient.hpp"
 #include "RouteExecutor.hpp"
 
-static_assert(!AppConfig::kEnableMotorOutputs,
-              "PHASE 2B SAFETY FAILURE: motor outputs must remain disabled");
+static_assert(AppConfig::kRaisedWheelBuild
+                  == AppConfig::kEnableMotorOutputs,
+              "SAFETY FAILURE: build profile and motor output disagree");
+
+#if AGV_RAISED_WHEEL_BUILD
+static_assert(AppConfig::kRaisedWheelBuild
+                  && AppConfig::kEnableMotorOutputs,
+              "RAISED-WHEEL SAFETY FAILURE: outputs must be enabled");
+#else
+static_assert(!AppConfig::kRaisedWheelBuild
+                  && !AppConfig::kEnableMotorOutputs,
+              "MOTOR-LOCK SAFETY FAILURE: outputs must remain disabled");
+#endif
 
 namespace
 {
@@ -179,7 +190,11 @@ namespace
         {
             Serial.printf("[SAFE] SERVER ACCEPTED AGV %lu\n",
                           static_cast<unsigned long>(agvID));
+#if AGV_RAISED_WHEEL_BUILD
+            Serial.println("[WARNING] MOTOR OUTPUTS ENABLED: RAISED-WHEEL ONLY");
+#else
             Serial.println("[SAFE] MOTOR OUTPUTS REMAIN COMPILE-LOCKED OFF");
+#endif
         };
 
         robotClient.onDisconnected = []()
@@ -305,13 +320,24 @@ void setup()
 
     Serial.println();
     Serial.println("================================");
-    Serial.println("PHASE 2B: 30CM EXECUTOR INTEGRATION");
+#if AGV_RAISED_WHEEL_BUILD
+    Serial.println("PHASE 2C: SERVER 30CM RAISED-WHEEL TEST");
+#else
+    Serial.println("PHASE 2C: SERVER 30CM MOTOR-LOCKED BUILD");
+#endif
     Serial.println("ACCEPTED ROUTE: EXACT [1 -> 2] ONLY");
     Serial.println("MOTION TARGET: 520 ENCODER COUNTS");
+#if AGV_RAISED_WHEEL_BUILD
+    Serial.println("BUILD PROFILE: esp32dev-raised-wheel");
+    Serial.println("MOTOR OUTPUTS: ENABLED");
+    Serial.println("WARNING: WHEELS MUST REMAIN OFF THE FLOOR");
+#else
+    Serial.println("BUILD PROFILE: esp32dev (MOTOR LOCKED)");
     Serial.println("MOTOR OUTPUTS: COMPILE-LOCKED OFF");
-    Serial.println("TB6612 STBY: LOW");
+#endif
+    Serial.println("TB6612 STBY AT BOOT: LOW");
     Serial.println("ARRIVED: SAFE-COMPLETION GATED");
-    Serial.println("UPLOAD/POWERED TEST NOT PERFORMED");
+    Serial.println("BOOT REQUIRED BEFORE COUNTDOWN AND MOTION");
     Serial.println("================================");
 
     configureCallbacks();
