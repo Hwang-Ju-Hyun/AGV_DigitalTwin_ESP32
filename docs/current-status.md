@@ -1,13 +1,13 @@
 # ESP32Test Current Status
 
-Last reviewed: 2026-08-08
+Last reviewed: 2026-08-10
 
 ## Repository baseline
 
 - This directory is the existing PlatformIO project for the physical ESP32 AGV.
 - The M4 safety-hardening work started from commit `1b3b80f924ce99e1fe3f9d9de19884e92be7e0fb` on branch `agent/phase2b-motor-locked-integration`.
 - Phase 2C raised-wheel preparation starts from commit `ef2d4f2d21e2768b06a63013c079de4e3a5dafb8` on branch `agent/phase2c-raised-wheel-test`.
-- This status records the previously hardware-checked motor-disabled Phase 2B path plus the build-only M4 and Phase 2C changes.
+- This status records the hardware-checked motor-disabled Phase 2B path, the M4 safety gates, and the first successful Phase 2C raised-wheel Server-to-physical-AGV-to-Unity run.
 - PlatformIO output, temporary build directories, IDE-local files, and the real credential file remain excluded by `.gitignore`.
 - `include/Secrets.hpp` is local-only and must never be displayed, staged, committed, or pushed.
 
@@ -31,11 +31,11 @@ The user uploaded the integrated binary with motor power isolated and repeated t
 - The executor transitioned to `OUTPUT_LOCKED` with `safe=1`, encoder counts still zero, PWM `0/0`, and `STBY=LOW`.
 - `STATUS` remained at node 1 with progress `0.000`, no wheel movement occurred, and `ARRIVED` remained blocked.
 
-This verifies the integrated state machine and compile-locked output path on the ESP32. It still does not verify powered motion, encoder progress in motion, or completion reporting.
+That earlier Phase 2B check verified the integrated state machine and compile-locked output path on the ESP32. Powered motion, encoder progress, and normal completion were subsequently exercised only in the controlled Phase 2C raised-wheel run documented below.
 
-## M4 pre-activation hardening (build-only)
+## M4 pre-activation hardening
 
-The active source now contains these additional safety gates, but this M4 build has not been uploaded or physically tested:
+The active source contains these additional safety gates. The normal target/settling/completion path was exercised during the Phase 2C raised-wheel run documented below. Countdown cancellation, BOOT E-stop, and injected fault paths remain separately unverified:
 
 - BOOT in `WAIT_BOOT` starts the existing five-second countdown.
 - A second BOOT press during `COUNTDOWN` forces safe outputs, returns to `WAIT_BOOT`, and retains the same stored route for later approval.
@@ -45,7 +45,7 @@ The active source now contains these additional safety gates, but this M4 build 
 - Completion requires both counts to remain at or above target with no encoder activity for at least 150 ms. A 2,000 ms settling limit, wrong direction, count overrun, wheel mismatch, or unsafe output invariant latches a fault.
 - `STATUS` remains on node 1 during `SETTLING`; node 2 and `ARRIVED` remain blocked until settling completes and safe outputs are verified.
 
-## Phase 2C raised-wheel build preparation (build-only)
+## Phase 2C raised-wheel profiles
 
 PlatformIO now exposes two explicit compile-time safety profiles:
 
@@ -55,7 +55,44 @@ PlatformIO now exposes two explicit compile-time safety profiles:
 - The raised-wheel boot banner explicitly reports `MOTOR OUTPUTS: ENABLED` and warns that the wheels must remain off the floor. The default banner explicitly reports the motor lock.
 - MotionController, RouteExecutor, RobotProtocol, GPIO, encoder polarity, 520-count target, PWM profile, BOOT behavior, fault gates, settling, and ARRIVED gating are unchanged from `ef2d4f2`.
 
-Both profiles have only been compiled. Neither Phase 2C binary has been uploaded or run on hardware.
+Both profiles have been compiled and uploaded to the physical ESP32. The default locked profile was reconfirmed with motor power isolated, and the raised-wheel profile completed the guarded 520-count path described below.
+
+## Confirmed Phase 2C raised-wheel end-to-end result
+
+On 2026-08-10, the user completed one Server-commanded raised-wheel run using:
+
+- ESP32 firmware branch `agent/phase2c-raised-wheel-test` at baseline commit `97c310c2ef77ff60337cdfbb2caee469827d25e3` plus the local Server-host address adjustment required by the current Windows/WSL network.
+- Server reference commit `ee3244f39253da23b9d480f775d398316fb46696` in `--physical-demo` mode.
+- Unity viewer branch `agent/u1-physical-demo-viewer` at commit `b821d0c2c90e6280310faddbe2555a2f447a9305`.
+- The chassis mechanically supported with both wheels clear of the floor.
+- ESP32 logic powered by USB while buck `VOUT+ -> ESP32 5V` remained disconnected; the battery powered the TB6612 motor supply through the existing common-ground wiring.
+- No FakeRobot session using AGV ID 1.
+
+The observed sequence was:
+
+1. The default `esp32dev` build connected through the corrected Windows-to-WSL forwarding path, received `HELLO_ACK accepted=1`, stored the exact two-node route, and remained at `WAIT_BOOT` with PWM `0/0` and `STBY=LOW`.
+2. Unity received the map and displayed the single physical-demo AGV at node 1 while the locked firmware remained stationary.
+3. The `esp32dev-raised-wheel` banner explicitly reported enabled motor output and raised-wheel-only operation. With motor power applied, the firmware still remained in `WAIT_BOOT`, PWM `0/0`, and `STBY=LOW`.
+4. One BOOT press started the five-second countdown. Both raised wheels then rotated in the intended forward direction, and encoder-based `STATUS.progress` moved Unity AGV 1 from node 1 toward node 2.
+5. The motors stopped automatically, settling completed, and the firmware repeatedly reported:
+
+```text
+[STATUS] node=2 target=0 progress=1.000 state=ARRIVAL_REPORTED L=538 R=543 PWM=0/0 STBY=LOW
+```
+
+The final left/right difference was 5 counts. Relative to the 520-count target, the observed stopping counts were +18 and +23; both remained within the configured `target + 100` overrun fault boundary. No fault was observed during this normal completion run. A later BOOT press in the terminal `ARRIVAL_REPORTED` state was logged as ignored, as expected for the latched completed route.
+
+This proves the first complete normal-path integration loop:
+
+```text
+Server exact route [1 -> 2]
+    -> ESP32 local approval and encoder-controlled raised-wheel motion
+    -> progress/final STATUS
+    -> Unity AGV movement
+    -> safe local stop and ARRIVAL_REPORTED
+```
+
+This was a raised-wheel encoder-count test. It does not prove that the vehicle travels exactly 30 cm on the floor.
 
 ## Firmware currently built
 
@@ -109,7 +146,7 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 ## Encoder progress STATUS
 
-- During a future enabled run, `STATUS.progress` is derived from the slower wheel's count divided by 520 and is clamped to `0.0` through `1.0`.
+- During the verified raised-wheel run, `STATUS.progress` was derived from the slower wheel's count divided by 520, clamped to `0.0` through `1.0`, and visualized by Unity.
 - While moving, `currentNodeID` remains node 1 and `currentLinkID` carries target node 2, matching Server reference commit `ee3244f39253da23b9d480f775d398316fb46696`.
 - During non-blocking settling, `currentNodeID` remains node 1, target node 2 remains identified, and encoder progress may remain `1.0` while outputs are already safe.
 - Only after the 150 ms stability gate completes does the prepared final STATUS report node 2 and progress `1.0` before `ARRIVED` is attempted.
@@ -128,22 +165,22 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
   Reported use was 46,360 bytes of RAM (14.1%) and 774,445 bytes of flash (59.1%).
 - `platformio run -e esp32dev-raised-wheel` succeeded on 2026-08-08.
   Reported use was 46,360 bytes of RAM (14.1%) and 775,345 bytes of flash (59.2%).
-- Phase 2C validation was build-only. No upload, Serial monitor, battery connection, motor activation, or powered movement was performed.
-- The earlier motor-locked hardware check described above remains the latest physical firmware verification.
+- On 2026-08-10, both the default locked profile and the raised-wheel profile were uploaded and their profile-specific boot banners were observed on the physical ESP32.
+- The raised-wheel profile completed one powered, Server-commanded 520-count normal path with final counts `L=538`, `R=543`, PWM `0/0`, `STBY=LOW`, progress `1.000`, and `ARRIVAL_REPORTED`.
+- Unity displayed the physical-demo AGV moving from node 1 toward node 2 from ESP32 progress STATUS. This was not a floor-distance test.
 
 ## Explicitly not yet verified
 
 - The 3-second stale-HELLO reconnect behavior on the live Windows/WSL path
 - Explicit socket cleanup after a failed `WiFiClient.connect()` attempt; this path is unchanged in the reduced M4 scope
-- M4 countdown-retain, BOOT E-stop, settling stability, and settling-timeout behavior on actual ESP32 hardware
-- The `esp32dev-raised-wheel` boot banner and actual 520-count raised-wheel motion path on hardware
-- Encoder progress STATUS received and visualized by Server/Unity
-- Powered 30 cm motion from a Server `[1 -> 2]` command
-- Every fault input on raised wheels, including stall, reversed count, mismatch, timeout, TCP loss, and E-stop
+- M4 countdown-retain and BOOT E-stop behavior during an active powered run
+- Injected settling activity and the 2,000 ms settling-timeout fault path on actual hardware
+- Every fault input on raised wheels, including stall, reversed count, mismatch, timeout, TCP loss, output-invariant failure, and E-stop
+- Actual floor travel distance for the nominal 520-count/30 cm segment
 - The future policy for detecting an accepted but half-open TCP session; M4 intentionally does not treat Server silence as a fault
-- Exactly-once Server processing of the safe-completion `ARRIVED`
+- Exactly-once Server processing of the safe-completion `ARRIVED`; the firmware's terminal `ARRIVAL_REPORTED` state was observed, but a separate Server-side exactly-once audit was not captured
 - Metric velocity, battery sensing, odometry, turns, or general multi-node execution
 
 ## Next safe step
 
-Keep using the default motor-locked environment unless a raised-wheel test is explicitly approved. Before uploading `esp32dev-raised-wheel`, confirm the wheels are mechanically clear of the floor, the vehicle cannot fall or drive away, the power wiring is secure, and a physical power-disconnect is immediately reachable. Upload and powered testing remain separate user-controlled steps. Half-open session policy remains a later decision.
+Return to the default motor-locked environment for routine communication work. Before any floor test, replace temporary power joins with the planned distribution terminals, add the fuse and physical power switch, secure the battery and boards to the chassis, and repeat visual wiring inspection. The first floor test must remain a separately approved low-speed test with a physical power disconnect immediately reachable. Fault-injection tests and half-open session policy remain later work.
