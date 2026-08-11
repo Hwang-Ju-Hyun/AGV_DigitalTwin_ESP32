@@ -1,12 +1,13 @@
 # ESP32Test Current Status
 
-Last reviewed: 2026-08-10
+Last reviewed: 2026-08-11
 
 ## Repository baseline
 
 - This directory is the existing PlatformIO project for the physical ESP32 AGV.
 - The M4 safety-hardening work started from commit `1b3b80f924ce99e1fe3f9d9de19884e92be7e0fb` on branch `agent/phase2b-motor-locked-integration`.
 - Phase 2C raised-wheel preparation starts from commit `ef2d4f2d21e2768b06a63013c079de4e3a5dafb8` on branch `agent/phase2c-raised-wheel-test`.
+- Phase 2D trajectory/odometry preview work starts from commit `efc9e191d9a8ed3bdeba502ee6d8ba8cacce7a01` on branch `agent/phase2d-trajectory-odometry`.
 - This status records the hardware-checked motor-disabled Phase 2B path, the M4 safety gates, and the first successful Phase 2C raised-wheel Server-to-physical-AGV-to-Unity run.
 - PlatformIO output, temporary build directories, IDE-local files, and the real credential file remain excluded by `.gitignore`.
 - `include/Secrets.hpp` is local-only and must never be displayed, staged, committed, or pushed.
@@ -45,11 +46,12 @@ The active source contains these additional safety gates. The normal target/sett
 - Completion requires both counts to remain at or above target with no encoder activity for at least 150 ms. A 2,000 ms settling limit, wrong direction, count overrun, wheel mismatch, or unsafe output invariant latches a fault.
 - `STATUS` remains on node 1 during `SETTLING`; node 2 and `ARRIVED` remain blocked until settling completes and safe outputs are verified.
 
-## Phase 2C raised-wheel profiles
+## Phase 2C/2D build profiles
 
 PlatformIO now exposes two explicit compile-time safety profiles:
 
 - `esp32dev` is the default environment. Both the raised-wheel flag and motor-output flag are `0`, so motor output remains compile-locked off.
+- `esp32dev-trajectory-preview` also has both motor flags at `0`. It alone advertises the preview capability and can parse, validate, and retain a versioned trajectory without exposing an execution path.
 - `esp32dev-raised-wheel` is the only environment where both flags are `1`, allowing the existing guarded motion path to energize the TB6612 after route acceptance, local BOOT approval, and the five-second countdown.
 - Missing, non-binary, or mismatched profile flags stop compilation. Profile-specific `static_assert` checks independently verify the locked and raised-wheel builds.
 - The raised-wheel boot banner explicitly reports `MOTOR OUTPUTS: ENABLED` and warns that the wheels must remain off the floor. The default banner explicitly reports the motor lock.
@@ -92,7 +94,24 @@ Server exact route [1 -> 2]
     -> safe local stop and ARRIVAL_REPORTED
 ```
 
-This was a raised-wheel encoder-count test. It does not prove that the vehicle travels exactly 30 cm on the floor.
+After the raised-wheel test, the user also reported one low-speed floor run of the same exact `[1 -> 2]` path completing without an observed problem. This confirms the basic single straight floor path, but it does not establish repeatable or calibrated 30 cm accuracy.
+
+## Phase 2D trajectory/odometry preview
+
+On 2026-08-11, the motor-locked preview firmware received Server `07afac4` trajectory `[1 -> 4]` and stored 8 waypoints. The observed result was `STORED_PREVIEW_ONLY`, with `PWM=0`, `STBY=LOW`, and no execution path.
+
+- `TRAJECTORY_COMMAND=102` uses format version `1` and at most 64 robot-local waypoints.
+- The wire order is `routeID`, `formatVersion`, `waypointCount`, `startNodeID`, `finalNodeID`, `millimetersPerMapUnit`, followed by 21-byte waypoint records.
+- `CAPABILITY_TRAJECTORY_COMMAND` means a future complete follower with STATUS/ARRIVED behavior. This firmware does not advertise it.
+- `CAPABILITY_TRAJECTORY_PREVIEW` means parse, validate, store, and log only. It is advertised only by the motor-locked preview environment.
+- `TrajectoryCommandStore` has no `MotionController` or `RouteExecutor` reference and exposes no execution API. Cancel, E-stop, or disconnect clears the preview only after the existing local safe-stop path runs.
+- Synthetic rotate waypoints must have `nodeID=0`, no `NODE_BOUNDARY`, and zero target speed. Start/final node boundaries and the final STOP/FINAL flags are validated before storage.
+- Encoder odometry uses the existing forward-normalized left/right counts, nominal wheel diameter 48 mm, nominal track width 130 mm, and 260 counts/revolution. It reports a robot-local `forward/left/heading` snapshot in mm/rad only.
+- Encoder count resets carry an atomic reset epoch so a reset is not misread as reverse travel. The angle normalization is bounded and does not use a potentially unbounded loop.
+- Odometry update/logging is compile-gated to `esp32dev-trajectory-preview`; it does not run in the previously verified raised-wheel control loop.
+- Network `STATUS.x/z/heading` remains unchanged. Robot-local millimetres are not sent as Server world-map coordinates.
+
+The Server preview path sends packet `102` separately from the legacy `ROUTE_COMMAND`; runtime trajectory motion remains blocked until scale, start heading, follower safety, and failure propagation are complete.
 
 ## Firmware currently built
 
@@ -102,8 +121,10 @@ The active PlatformIO firmware is now split into these responsibilities:
 - `src/RobotClient.cpp`: Wi-Fi/TCP session, HELLO/ACK, packet handling, STATUS, ARRIVED, ERROR, and PING/PONG.
 - `src/MotionController.cpp`: encoder interrupts, the verified 30 cm forward profile, synchronization, immediate motion safety, and encoder-stability settling.
 - `src/RouteExecutor.cpp`: exact-route validation, BOOT/countdown/E-stop gating, running/settling state, fault latch, progress STATUS, and ARRIVED gating.
+- `src/EncoderOdometry.cpp`: preview-only robot-local differential-drive odometry using an atomic encoder reset epoch.
+- `src/TrajectoryCommandStore.cpp`: non-driving trajectory validation, duplicate handling, and bounded storage.
 - `src/main.cpp`: callback wiring and a non-blocking safety/network loop; it does not duplicate the verified motor algorithm.
-- `platformio.ini`: selects the default motor-locked build or the explicit raised-wheel-only build profile.
+- `platformio.ini`: selects the default motor-locked, trajectory-preview motor-locked, or explicit raised-wheel-only profile.
 
 The only accepted physical-demo interpretation remains:
 
@@ -120,6 +141,7 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 - The default `esp32dev` environment compiles `AppConfig::kEnableMotorOutputs=false` and remains the safe target for a bare `platformio run`.
 - Only `esp32dev-raised-wheel` compiles `AppConfig::kEnableMotorOutputs=true`; it is clearly marked as raised-wheel-only and is not a floor-driving profile.
+- `esp32dev-trajectory-preview` is independently asserted to remain motor-locked; trajectory receipt cannot reach a motor-start API.
 - `src/main.cpp` retains compile-time assertions for both profiles, and `Config.hpp` rejects missing, invalid, or mismatched profile flags.
 - In the default environment, the start path returns `OUTPUT_DISABLED` before any HIGH direction/STBY command or nonzero PWM command is reachable.
 - Motor hardware is initialized with `STBY=LOW`, PWM zero, and all direction pins low before Serial or Wi-Fi starts.
@@ -150,7 +172,7 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 - While moving, `currentNodeID` remains node 1 and `currentLinkID` carries target node 2, matching Server reference commit `ee3244f39253da23b9d480f775d398316fb46696`.
 - During non-blocking settling, `currentNodeID` remains node 1, target node 2 remains identified, and encoder progress may remain `1.0` while outputs are already safe.
 - Only after the 150 ms stability gate completes does the prepared final STATUS report node 2 and progress `1.0` before `ARRIVED` is attempted.
-- Metric velocity, measured battery percentage, full `(x,z,heading)` odometry, turns, and arbitrary route expansion are not implemented in this phase.
+- Metric battery sensing, Server-world `(x,z,heading)` odometry, trajectory execution, turns, and arbitrary route expansion are not implemented in this phase. Robot-local odometry exists only in the motor-locked preview log.
 
 ## Preserved physical-vehicle reference
 
@@ -161,13 +183,19 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 ## Build validation
 
+- On 2026-08-10, the Phase 2D worktree built all three environments without upload:
+  - `esp32dev`: RAM 46,384 bytes (14.2%), flash 775,505 bytes (59.2%)
+  - `esp32dev-trajectory-preview`: RAM 48,028 bytes (14.7%), flash 785,201 bytes (59.9%)
+  - `esp32dev-raised-wheel`: RAM 46,384 bytes (14.2%), flash 776,401 bytes (59.2%)
+- The matching WSL Server worktree passed CMake configure/build, `ctest`, and `TrajectorySmokeTest`. This was synthetic LINE/Bezier/LINE and serializer validation only; the Server did not dispatch a trajectory to hardware.
+
 - `platformio run -e esp32dev` succeeded on 2026-08-08.
   Reported use was 46,360 bytes of RAM (14.1%) and 774,445 bytes of flash (59.1%).
 - `platformio run -e esp32dev-raised-wheel` succeeded on 2026-08-08.
   Reported use was 46,360 bytes of RAM (14.1%) and 775,345 bytes of flash (59.2%).
 - On 2026-08-10, both the default locked profile and the raised-wheel profile were uploaded and their profile-specific boot banners were observed on the physical ESP32.
 - The raised-wheel profile completed one powered, Server-commanded 520-count normal path with final counts `L=538`, `R=543`, PWM `0/0`, `STBY=LOW`, progress `1.000`, and `ARRIVAL_REPORTED`.
-- Unity displayed the physical-demo AGV moving from node 1 toward node 2 from ESP32 progress STATUS. This was not a floor-distance test.
+- Unity displayed the physical-demo AGV moving from node 1 toward node 2 from ESP32 progress STATUS. A later low-speed floor run was user-reported successful, but calibrated distance/repeatability was not measured.
 
 ## Explicitly not yet verified
 
@@ -176,11 +204,12 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 - M4 countdown-retain and BOOT E-stop behavior during an active powered run
 - Injected settling activity and the 2,000 ms settling-timeout fault path on actual hardware
 - Every fault input on raised wheels, including stall, reversed count, mismatch, timeout, TCP loss, output-invariant failure, and E-stop
-- Actual floor travel distance for the nominal 520-count/30 cm segment
+- Calibrated and repeatable floor distance for the nominal 520-count/30 cm segment
 - The future policy for detecting an accepted but half-open TCP session; M4 intentionally does not treat Server silence as a fault
 - Exactly-once Server processing of the safe-completion `ARRIVED`; the firmware's terminal `ARRIVAL_REPORTED` state was observed, but a separate Server-side exactly-once audit was not captured
-- Metric velocity, battery sensing, odometry, turns, or general multi-node execution
+- Robot-local odometry calibration, Server-world pose alignment, metric velocity STATUS, battery sensing, trajectory following, turns, or general multi-node execution
+- Physical `millimetersPerMapUnit`, trusted start heading, and a drivable curve geometry
 
 ## Next safe step
 
-Return to the default motor-locked environment for routine communication work. Before any floor test, replace temporary power joins with the planned distribution terminals, add the fuse and physical power switch, secure the battery and boards to the chassis, and repeat visual wiring inspection. The first floor test must remain a separately approved low-speed test with a physical power disconnect immediately reachable. Fault-injection tests and half-open session policy remain later work.
+Keep routine work motor-locked. The next software step is a non-driving waypoint-follower trace; powered curve tests remain a separate later approval.

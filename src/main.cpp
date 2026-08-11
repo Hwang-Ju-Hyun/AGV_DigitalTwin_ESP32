@@ -2,13 +2,19 @@
 #include <cstring>
 
 #include "Config.hpp"
+#include "EncoderOdometry.hpp"
 #include "MotionController.hpp"
 #include "RobotClient.hpp"
 #include "RouteExecutor.hpp"
+#include "TrajectoryCommandStore.hpp"
+#include "TrajectoryConfig.hpp"
 
 static_assert(AppConfig::kRaisedWheelBuild
                   == AppConfig::kEnableMotorOutputs,
               "SAFETY FAILURE: build profile and motor output disagree");
+static_assert(!TrajectoryConfig::kPreviewEnabled
+                  || !AppConfig::kEnableMotorOutputs,
+              "SAFETY FAILURE: trajectory preview must remain motor-locked");
 
 #if AGV_RAISED_WHEEL_BUILD
 static_assert(AppConfig::kRaisedWheelBuild
@@ -25,6 +31,10 @@ namespace
     RobotClient robotClient;
     MotionController motionController;
     RouteExecutor routeExecutor(motionController);
+#if AGV_TRAJECTORY_PREVIEW_ENABLED
+    EncoderOdometry encoderOdometry;
+    TrajectoryCommandStore trajectoryStore;
+#endif
 
     bool networkConfigured = false;
     uint32_t lastStatusMs = 0;
@@ -201,6 +211,9 @@ namespace
         {
             // RobotClient invokes this before closing/clearing its socket.
             routeExecutor.onNetworkLost();
+#if AGV_TRAJECTORY_PREVIEW_ENABLED
+            trajectoryStore.clear();
+#endif
         };
 
         robotClient.onRouteCommand = [](
@@ -219,15 +232,65 @@ namespace
                 Serial.println("[SAFE] Route not executable in current state");
         };
 
+#if AGV_TRAJECTORY_PREVIEW_ENABLED
+        robotClient.onTrajectoryCommand = [](
+            const RobotProtocol::TrajectoryCommandPayload& trajectory)
+        {
+            if (!TrajectoryConfig::kPreviewEnabled
+                || AppConfig::kEnableMotorOutputs)
+            {
+                Serial.println(
+                    "[SAFE] TRAJECTORY_COMMAND ignored: preview profile disabled");
+                return;
+            }
+
+            const TrajectoryCommandStore::StoreResult result =
+                trajectoryStore.store(trajectory);
+            Serial.printf(
+                "[TRAJECTORY] result=%s routeID=%lu start=%lu final=%lu "
+                "waypoints=%u scale=%.5f mm/unit\n",
+                TrajectoryCommandStore::resultName(result),
+                static_cast<unsigned long>(trajectory.routeID),
+                static_cast<unsigned long>(trajectory.startNodeID),
+                static_cast<unsigned long>(trajectory.finalNodeID),
+                trajectory.waypointCount,
+                trajectory.millimetersPerMapUnit);
+
+            if (result == TrajectoryCommandStore::StoreResult::STORED)
+            {
+                const MotionController::Snapshot enc = motionController.snapshot();
+                encoderOdometry.resetLocal(enc.leftCount,
+                                           enc.rightCount,
+                                           enc.encoderResetEpoch,
+                                           millis());
+                const RobotProtocol::TrajectoryWaypoint& last =
+                    trajectory.waypoints[trajectory.waypointCount - 1];
+                Serial.printf(
+                    "[TRAJECTORY] PREVIEW ONLY; final=(%.1f, %.1f)mm "
+                    "heading=%.3frad; no execution path exists\n",
+                    last.forwardMm,
+                    last.leftMm,
+                    last.headingRad);
+                Serial.println("[SAFE] PWM=0 STBY=LOW; BOOT cannot execute trajectory");
+            }
+        };
+#endif
+
         robotClient.onCancelRoute = []()
         {
             routeExecutor.cancelRoute();
+#if AGV_TRAJECTORY_PREVIEW_ENABLED
+            trajectoryStore.clear();
+#endif
             Serial.println("[SAFE] CANCEL_ROUTE handled; outputs forced safe");
         };
 
         robotClient.onEmergencyStop = []()
         {
             routeExecutor.emergencyStop();
+#if AGV_TRAJECTORY_PREVIEW_ENABLED
+            trajectoryStore.clear();
+#endif
             Serial.println("[SAFE] EMERGENCY_STOP handled immediately");
         };
     }
@@ -294,6 +357,9 @@ namespace
 
         lastStatusLogMs = nowMs;
         const MotionController::Snapshot snapshot = motionController.snapshot();
+#if AGV_TRAJECTORY_PREVIEW_ENABLED
+        const EncoderOdometry::Snapshot odometry = encoderOdometry.snapshot();
+#endif
         Serial.printf(
             "[STATUS] node=%lu target=%lu progress=%.3f state=%s "
             "L=%ld R=%ld PWM=%d/%d STBY=%s\n",
@@ -306,6 +372,16 @@ namespace
             snapshot.leftPwm,
             snapshot.rightPwm,
             digitalRead(AppConfig::kMotorStandbyPin) == LOW ? "LOW" : "HIGH");
+#if AGV_TRAJECTORY_PREVIEW_ENABLED
+        Serial.printf(
+            "[ODOM] LOCAL_ONLY forward=%.2fmm left=%.2fmm heading=%.4frad "
+            "velocity=%.2fmm/s finite=%u\n",
+            odometry.forwardMm,
+            odometry.leftMm,
+            odometry.headingRad,
+            odometry.linearVelocityMmPerSecond,
+            odometry.finite ? 1U : 0U);
+#endif
     }
 }
 
@@ -314,6 +390,15 @@ void setup()
     // Motor/encoder hardware enters the safe state before Serial or Wi-Fi.
     routeExecutor.begin();
     initializeBootButton();
+#if AGV_TRAJECTORY_PREVIEW_ENABLED
+    {
+        const MotionController::Snapshot enc = motionController.snapshot();
+        encoderOdometry.resetLocal(enc.leftCount,
+                                   enc.rightCount,
+                                   enc.encoderResetEpoch,
+                                   millis());
+    }
+#endif
 
     Serial.begin(AppConfig::kSerialBaud);
     delay(300);
@@ -322,6 +407,8 @@ void setup()
     Serial.println("================================");
 #if AGV_RAISED_WHEEL_BUILD
     Serial.println("PHASE 2C: SERVER 30CM RAISED-WHEEL TEST");
+#elif AGV_TRAJECTORY_PREVIEW_ENABLED
+    Serial.println("PHASE 2D: TRAJECTORY + ODOMETRY MOTOR-LOCKED PREVIEW");
 #else
     Serial.println("PHASE 2C: SERVER 30CM MOTOR-LOCKED BUILD");
 #endif
@@ -331,10 +418,25 @@ void setup()
     Serial.println("BUILD PROFILE: esp32dev-raised-wheel");
     Serial.println("MOTOR OUTPUTS: ENABLED");
     Serial.println("WARNING: WHEELS MUST REMAIN OFF THE FLOOR");
+#elif AGV_TRAJECTORY_PREVIEW_ENABLED
+    Serial.println("BUILD PROFILE: esp32dev-trajectory-preview");
+    Serial.println("MOTOR OUTPUTS: COMPILE-LOCKED OFF");
 #else
     Serial.println("BUILD PROFILE: esp32dev (MOTOR LOCKED)");
     Serial.println("MOTOR OUTPUTS: COMPILE-LOCKED OFF");
 #endif
+#if AGV_TRAJECTORY_PREVIEW_ENABLED
+    Serial.println("TRAJECTORY CAPABILITY: PREVIEW/PARSE/STORE ONLY");
+    Serial.println("TRAJECTORY EXECUTION: COMPILE-TIME UNAVAILABLE");
+#else
+    Serial.println("TRAJECTORY CAPABILITY: NOT ADVERTISED");
+#endif
+#if AGV_TRAJECTORY_PREVIEW_ENABLED
+    Serial.println("ODOMETRY: ROBOT-LOCAL MM/RAD LOG ONLY");
+#else
+    Serial.println("ODOMETRY PREVIEW: INACTIVE IN THIS BUILD");
+#endif
+    Serial.println("STATUS WORLD POSE: UNCHANGED NODE/PROGRESS MODE");
     Serial.println("TB6612 STBY AT BOOT: LOW");
     Serial.println("ARRIVED: SAFE-COMPLETION GATED");
     Serial.println("BOOT REQUIRED BEFORE COUNTDOWN AND MOTION");
@@ -352,7 +454,10 @@ void setup()
                       AppConfig::kWifiPassword,
                       AppConfig::kServerHost,
                       AppConfig::kServerPort,
-                      AppConfig::kRequestedAgvID);
+                      AppConfig::kRequestedAgvID,
+                      TrajectoryConfig::kPreviewEnabled
+                          ? RobotProtocol::CAPABILITY_TRAJECTORY_PREVIEW
+                          : RobotProtocol::CAPABILITY_NONE);
 }
 
 void loop()
@@ -373,6 +478,18 @@ void loop()
     // Encoder, timeout, stall and immediate motion safety are serviced before
     // any potentially variable-duration TCP work.
     routeExecutor.update(nowMs, sessionReady());
+
+#if AGV_TRAJECTORY_PREVIEW_ENABLED
+    // The MotionController snapshot copies both counts and the reset epoch in
+    // one critical section. Odometry math stays outside the encoder ISR lock.
+    {
+        const MotionController::Snapshot enc = motionController.snapshot();
+        encoderOdometry.update(enc.leftCount,
+                               enc.rightCount,
+                               enc.encoderResetEpoch,
+                               nowMs);
+    }
+#endif
 
     if (networkConfigured)
         robotClient.update();

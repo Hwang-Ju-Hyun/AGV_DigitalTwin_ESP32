@@ -16,13 +16,15 @@ void RobotClient::begin(const char* ssid,
                         const char* password,
                         const char* serverHost,
                         uint16_t serverPort,
-                        uint32_t requestedAgvID)
+                        uint32_t requestedAgvID,
+                        uint32_t capabilities)
 {
     m_Ssid = ssid;
     m_Password = password;
     m_ServerHost = serverHost;
     m_ServerPort = serverPort;
     m_RequestedAgvID = requestedAgvID;
+    m_Capabilities = capabilities;
     m_AgvID = requestedAgvID;
     m_RxBuffer.reserve(512);
 
@@ -62,9 +64,10 @@ bool RobotClient::sendHello()
 {
     RobotProtocol::HelloPayload hello;
     hello.requestedAgvID = m_RequestedAgvID;
+    hello.capabilities = m_Capabilities;
 
     std::vector<uint8_t> payload;
-    payload.reserve(7);
+    payload.reserve(m_Capabilities == RobotProtocol::CAPABILITY_NONE ? 7 : 11);
     RobotProtocol::PacketWriter writer(payload);
     RobotProtocol::writeHelloPayload(writer, hello);
     return sendPacket(RobotProtocol::PacketID::HELLO, payload);
@@ -283,6 +286,39 @@ void RobotClient::handleBody(const uint8_t* body, size_t length)
                       static_cast<unsigned long>(route.routeID), route.nodeCount);
         if (onRouteCommand)
             onRouteCommand(route);
+        break;
+    }
+    case RobotProtocol::PacketID::TRAJECTORY_COMMAND:
+    {
+        if (m_SessionState != SessionState::ACCEPTED
+            || header.agvID != m_AgvID)
+        {
+            Serial.println("[RobotProtocol] Unauthorized TRAJECTORY_COMMAND ignored");
+            return;
+        }
+        constexpr uint32_t kTrajectoryReceiveCapabilities =
+            RobotProtocol::CAPABILITY_TRAJECTORY_COMMAND
+            | RobotProtocol::CAPABILITY_TRAJECTORY_PREVIEW;
+        if ((m_Capabilities & kTrajectoryReceiveCapabilities) == 0)
+        {
+            Serial.println(
+                "[RobotProtocol] Unsupported TRAJECTORY_COMMAND ignored");
+            return;
+        }
+
+        RobotProtocol::TrajectoryCommandPayload trajectory;
+        if (!RobotProtocol::readTrajectoryCommandPayload(reader, trajectory))
+        {
+            Serial.println("[RobotProtocol] Invalid TRAJECTORY_COMMAND");
+            return;
+        }
+        Serial.printf(
+            "[RobotProtocol] TRAJECTORY routeID=%lu format=%u waypoints=%u\n",
+            static_cast<unsigned long>(trajectory.routeID),
+            trajectory.formatVersion,
+            trajectory.waypointCount);
+        if (onTrajectoryCommand)
+            onTrajectoryCommand(trajectory);
         break;
     }
     case RobotProtocol::PacketID::CANCEL_ROUTE:

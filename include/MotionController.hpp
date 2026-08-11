@@ -48,6 +48,7 @@ public:
         float progress = 0.0f;
         float velocityCountsPerSecond = 0.0f;
         uint32_t elapsedMs = 0;
+        uint32_t encoderResetEpoch = 0;
         bool running = false;
         bool settling = false;
         bool completed = false;
@@ -95,6 +96,9 @@ private:
     static void readEncoderState(int32_t& left,
                                  int32_t& right,
                                  uint32_t& activitySequence);
+    static void readEncoderSnapshot(int32_t& left,
+                                    int32_t& right,
+                                    uint32_t& resetEpoch);
     static void resetEncoderCounts();
 
     void forceSafeOutputs();
@@ -106,6 +110,7 @@ private:
     static volatile int32_t s_LeftCount;
     static volatile int32_t s_RightCount;
     static volatile uint32_t s_EncoderActivitySequence;
+    static volatile uint32_t s_EncoderResetEpoch;
     static portMUX_TYPE s_EncoderMux;
 
     State m_State = State::NOT_READY;

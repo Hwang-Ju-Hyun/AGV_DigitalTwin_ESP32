@@ -48,6 +48,7 @@ namespace
 volatile int32_t MotionController::s_LeftCount = 0;
 volatile int32_t MotionController::s_RightCount = 0;
 volatile uint32_t MotionController::s_EncoderActivitySequence = 0;
+volatile uint32_t MotionController::s_EncoderResetEpoch = 0;
 portMUX_TYPE MotionController::s_EncoderMux = portMUX_INITIALIZER_UNLOCKED;
 
 void IRAM_ATTR MotionController::leftEncoderISR()
@@ -93,12 +94,24 @@ void MotionController::readEncoderState(int32_t& left,
     portEXIT_CRITICAL(&s_EncoderMux);
 }
 
+void MotionController::readEncoderSnapshot(int32_t& left,
+                                           int32_t& right,
+                                           uint32_t& resetEpoch)
+{
+    portENTER_CRITICAL(&s_EncoderMux);
+    left = s_LeftCount;
+    right = s_RightCount;
+    resetEpoch = s_EncoderResetEpoch;
+    portEXIT_CRITICAL(&s_EncoderMux);
+}
+
 void MotionController::resetEncoderCounts()
 {
     portENTER_CRITICAL(&s_EncoderMux);
     s_LeftCount = 0;
     s_RightCount = 0;
     s_EncoderActivitySequence = 0;
+    ++s_EncoderResetEpoch;
     portEXIT_CRITICAL(&s_EncoderMux);
 }
 
@@ -431,7 +444,9 @@ void MotionController::emergencyStop(Fault cause)
 MotionController::Snapshot MotionController::snapshot() const
 {
     Snapshot result;
-    readEncoderCounts(result.leftCount, result.rightCount);
+    readEncoderSnapshot(result.leftCount,
+                        result.rightCount,
+                        result.encoderResetEpoch);
     result.targetCount = m_TargetCount;
     result.leftPwm = m_LeftPwm;
     result.rightPwm = m_RightPwm;

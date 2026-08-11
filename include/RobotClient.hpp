@@ -21,7 +21,8 @@ public:
                const char* password,
                const char* serverHost,
                uint16_t serverPort,
-               uint32_t requestedAgvID);
+               uint32_t requestedAgvID,
+               uint32_t capabilities = RobotProtocol::CAPABILITY_NONE);
 
     void update();
     bool connected();
@@ -36,6 +37,9 @@ public:
     std::function<void(uint32_t agvID)> onAccepted;
     std::function<void()> onDisconnected;
     std::function<void(const RobotProtocol::RouteCommandPayload& route)> onRouteCommand;
+    std::function<void(
+        const RobotProtocol::TrajectoryCommandPayload& trajectory)>
+        onTrajectoryCommand;
     std::function<void()> onCancelRoute;
     std::function<void()> onEmergencyStop;
 
@@ -53,6 +57,7 @@ private:
     const char* m_ServerHost = nullptr;
     uint16_t m_ServerPort = 0;
     uint32_t m_RequestedAgvID = 0;
+    uint32_t m_Capabilities = RobotProtocol::CAPABILITY_NONE;
     uint32_t m_AgvID = 0;
     uint32_t m_NextSequence = 1;
     uint32_t m_LastReconnectAttemptMs = 0;

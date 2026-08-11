@@ -8,9 +8,30 @@ namespace RobotProtocol
 {
     constexpr uint16_t kProtocolVersion = 1;
     constexpr uint16_t kMaxRouteNodes = 64;
+    constexpr uint8_t kTrajectoryFormatVersion = 1;
+    constexpr uint16_t kMaxTrajectoryWaypoints = 64;
     constexpr uint16_t kPacketBodyHeaderSize = sizeof(uint16_t) + sizeof(uint32_t) + sizeof(uint32_t);
     constexpr uint16_t kFrameHeaderSize = sizeof(uint16_t);
     constexpr uint16_t kMaxFrameSize = 2048;
+    constexpr uint16_t kTrajectoryFixedPayloadSize = 19;
+    constexpr uint16_t kTrajectoryWaypointWireSize = 21;
+    constexpr uint16_t kMaxTrajectoryPayloadSize =
+        kTrajectoryFixedPayloadSize
+        + kMaxTrajectoryWaypoints * kTrajectoryWaypointWireSize;
+    static_assert(kFrameHeaderSize + kPacketBodyHeaderSize
+                      + kMaxTrajectoryPayloadSize
+                      <= kMaxFrameSize,
+                  "Maximum trajectory frame exceeds the ESP32 receive limit");
+
+    enum ClientCapability : uint32_t
+    {
+        CAPABILITY_NONE = 0,
+        // Full follower support is intentionally not advertised by the
+        // current firmware.
+        CAPABILITY_TRAJECTORY_COMMAND = 1u << 0,
+        // Parse/validate/store only. This cannot start any motor path.
+        CAPABILITY_TRAJECTORY_PREVIEW = 1u << 1
+    };
 
     enum class ClientType : uint8_t
     {
@@ -25,6 +46,7 @@ namespace RobotProtocol
     {
         ROUTE_COMMAND = 100,
         CANCEL_ROUTE = 101,
+        TRAJECTORY_COMMAND = 102,
         STATUS = 200,
         ARRIVED = 201,
         PING = 300,
@@ -78,11 +100,44 @@ namespace RobotProtocol
         RouteNodeTime nodes[kMaxRouteNodes];
     };
 
+    enum TrajectoryWaypointFlag : uint8_t
+    {
+        TRAJECTORY_FLAG_NONE = 0,
+        TRAJECTORY_FLAG_NODE_BOUNDARY = 1u << 0,
+        TRAJECTORY_FLAG_STOP = 1u << 1,
+        TRAJECTORY_FLAG_ROTATE_IN_PLACE = 1u << 2,
+        TRAJECTORY_FLAG_FINAL = 1u << 3
+    };
+
+    struct TrajectoryWaypoint
+    {
+        // Format v1 robot-local frame: +forward is the robot's trusted start
+        // heading, +left is counter-clockwise 90 degrees from +forward.
+        float forwardMm = 0.0f;
+        float leftMm = 0.0f;
+        float headingRad = 0.0f;
+        float targetSpeedMmPerSecond = 0.0f;
+        uint32_t nodeID = 0;
+        uint8_t flags = TRAJECTORY_FLAG_NONE;
+    };
+
+    struct TrajectoryCommandPayload
+    {
+        uint32_t routeID = 0;
+        uint8_t formatVersion = 0;
+        uint16_t waypointCount = 0;
+        uint32_t startNodeID = 0;
+        uint32_t finalNodeID = 0;
+        float millimetersPerMapUnit = 0.0f;
+        TrajectoryWaypoint waypoints[kMaxTrajectoryWaypoints];
+    };
+
     struct HelloPayload
     {
         uint16_t protocolVersion = kProtocolVersion;
         ClientType clientType = ClientType::ESP32_ROBOT;
         uint32_t requestedAgvID = 0;
+        uint32_t capabilities = CAPABILITY_NONE;
     };
 
     struct HelloAckPayload
@@ -161,6 +216,8 @@ namespace RobotProtocol
     void writeStatusPayload(PacketWriter& writer, const StatusPayload& payload);
     void writeArrivedPayload(PacketWriter& writer, const ArrivedPayload& payload);
     bool readRouteCommandPayload(PacketReader& reader, RouteCommandPayload& outPayload);
+    bool readTrajectoryCommandPayload(PacketReader& reader,
+                                      TrajectoryCommandPayload& outPayload);
     void writeErrorPayload(PacketWriter& writer, const ErrorPayload& payload);
     void writeTimePayload(PacketWriter& writer, const TimePayload& payload);
     bool readTimePayload(PacketReader& reader, TimePayload& outPayload);

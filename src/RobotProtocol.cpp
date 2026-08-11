@@ -1,5 +1,6 @@
 #include "RobotProtocol.hpp"
 
+#include <cmath>
 #include <cstring>
 
 namespace RobotProtocol
@@ -97,6 +98,7 @@ namespace RobotProtocol
         {
         case PacketID::ROUTE_COMMAND:
         case PacketID::CANCEL_ROUTE:
+        case PacketID::TRAJECTORY_COMMAND:
         case PacketID::STATUS:
         case PacketID::ARRIVED:
         case PacketID::PING:
@@ -142,6 +144,10 @@ namespace RobotProtocol
         writer.writeUInt16(payload.protocolVersion);
         writer.writeUInt8(static_cast<uint8_t>(payload.clientType));
         writer.writeUInt32(payload.requestedAgvID);
+        // Keep the exact legacy 19-byte HELLO frame when no extension is
+        // advertised. The Server accepts this optional trailing uint32.
+        if (payload.capabilities != CAPABILITY_NONE)
+            writer.writeUInt32(payload.capabilities);
     }
 
     bool readHelloAckPayload(PacketReader& reader, HelloAckPayload& outPayload)
@@ -196,6 +202,65 @@ namespace RobotProtocol
                 return false;
         }
         return true;
+    }
+
+    bool readTrajectoryCommandPayload(PacketReader& reader,
+                                      TrajectoryCommandPayload& outPayload)
+    {
+        outPayload = {};
+        if (!reader.readUInt32(outPayload.routeID))
+            return false;
+        if (!reader.readUInt8(outPayload.formatVersion))
+            return false;
+        if (outPayload.formatVersion != kTrajectoryFormatVersion)
+            return false;
+        if (!reader.readUInt16(outPayload.waypointCount))
+            return false;
+        if (outPayload.waypointCount == 0
+            || outPayload.waypointCount > kMaxTrajectoryWaypoints)
+        {
+            return false;
+        }
+        if (!reader.readUInt32(outPayload.startNodeID))
+            return false;
+        if (!reader.readUInt32(outPayload.finalNodeID))
+            return false;
+        if (!reader.readFloat(outPayload.millimetersPerMapUnit)
+            || !std::isfinite(outPayload.millimetersPerMapUnit)
+            || outPayload.millimetersPerMapUnit <= 0.0f)
+        {
+            return false;
+        }
+
+        constexpr uint8_t kKnownFlags = TRAJECTORY_FLAG_NODE_BOUNDARY
+            | TRAJECTORY_FLAG_STOP
+            | TRAJECTORY_FLAG_ROTATE_IN_PLACE
+            | TRAJECTORY_FLAG_FINAL;
+
+        for (uint16_t i = 0; i < outPayload.waypointCount; ++i)
+        {
+            TrajectoryWaypoint& waypoint = outPayload.waypoints[i];
+            if (!reader.readFloat(waypoint.forwardMm)
+                || !reader.readFloat(waypoint.leftMm)
+                || !reader.readFloat(waypoint.headingRad)
+                || !reader.readFloat(waypoint.targetSpeedMmPerSecond)
+                || !reader.readUInt32(waypoint.nodeID)
+                || !reader.readUInt8(waypoint.flags))
+            {
+                return false;
+            }
+            if (!std::isfinite(waypoint.forwardMm)
+                || !std::isfinite(waypoint.leftMm)
+                || !std::isfinite(waypoint.headingRad)
+                || !std::isfinite(waypoint.targetSpeedMmPerSecond)
+                || waypoint.targetSpeedMmPerSecond < 0.0f
+                || (waypoint.flags & static_cast<uint8_t>(~kKnownFlags)) != 0)
+            {
+                return false;
+            }
+        }
+
+        return reader.remaining() == 0;
     }
 
     void writeErrorPayload(PacketWriter& writer, const ErrorPayload& payload)
