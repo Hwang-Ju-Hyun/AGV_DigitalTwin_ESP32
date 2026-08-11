@@ -8,6 +8,9 @@
 #include "RouteExecutor.hpp"
 #include "TrajectoryCommandStore.hpp"
 #include "TrajectoryConfig.hpp"
+#if AGV_TRAJECTORY_TRACE_ENABLED
+#include "TrajectoryFollowerTrace.hpp"
+#endif
 
 static_assert(AppConfig::kRaisedWheelBuild
                   == AppConfig::kEnableMotorOutputs,
@@ -15,6 +18,16 @@ static_assert(AppConfig::kRaisedWheelBuild
 static_assert(!TrajectoryConfig::kPreviewEnabled
                   || !AppConfig::kEnableMotorOutputs,
               "SAFETY FAILURE: trajectory preview must remain motor-locked");
+static_assert(!TrajectoryConfig::kTraceEnabled
+                  || (TrajectoryConfig::kPreviewEnabled
+                      && !AppConfig::kEnableMotorOutputs
+                      && !AppConfig::kRaisedWheelBuild),
+              "SAFETY FAILURE: trajectory trace must remain preview-only");
+#if AGV_TRAJECTORY_TRACE_ENABLED
+static_assert(TrajectoryFollowerTrace::kHalfTrackWidthMm
+                  == TrajectoryConfig::kTrackWidthMm * 0.5,
+              "TRACE FAILURE: follower and odometry track widths disagree");
+#endif
 
 #if AGV_RAISED_WHEEL_BUILD
 static_assert(AppConfig::kRaisedWheelBuild
@@ -35,6 +48,11 @@ namespace
     EncoderOdometry encoderOdometry;
     TrajectoryCommandStore trajectoryStore;
 #endif
+#if AGV_TRAJECTORY_TRACE_ENABLED
+    TrajectoryFollowerTrace trajectoryTrace;
+    TrajectoryFollowerTrace::State lastLoggedTraceState =
+        TrajectoryFollowerTrace::State::EMPTY;
+#endif
 
     bool networkConfigured = false;
     uint32_t lastStatusMs = 0;
@@ -53,6 +71,44 @@ namespace
     {
         return robotClient.connected() && robotClient.accepted();
     }
+
+#if AGV_TRAJECTORY_TRACE_ENABLED
+    void resetTrajectoryTrace()
+    {
+        trajectoryTrace.reset();
+        lastLoggedTraceState = TrajectoryFollowerTrace::State::EMPTY;
+    }
+
+    void logTrajectoryTraceSummary()
+    {
+        const TrajectoryFollowerTrace::Snapshot trace =
+            trajectoryTrace.snapshot();
+        Serial.printf(
+            "[TRACE] state=%s samples=%u minRadius=%.1fmm "
+            "minInnerRatio=%.3f maxAbsCurvature=%.6f/mm reverse=%u\n",
+            TrajectoryFollowerTrace::stateName(trace.state),
+            trace.analyzedSampleCount,
+            trace.minimumTurnRadiusMm,
+            trace.minimumRawInnerWheelRatio,
+            trace.maximumAbsoluteCurvaturePerMm,
+            trace.reverseRequired ? 1U : 0U);
+    }
+
+    void updateTrajectoryTrace()
+    {
+        if (!trajectoryStore.hasCommand())
+            return;
+
+        const TrajectoryFollowerTrace::State state =
+            trajectoryTrace.update(trajectoryStore.command());
+        if (state == lastLoggedTraceState)
+            return;
+
+        lastLoggedTraceState = state;
+        if (state != TrajectoryFollowerTrace::State::ANALYZING)
+            logTrajectoryTraceSummary();
+    }
+#endif
 
     bool credentialsAreConfigured()
     {
@@ -212,6 +268,9 @@ namespace
             // RobotClient invokes this before closing/clearing its socket.
             routeExecutor.onNetworkLost();
 #if AGV_TRAJECTORY_PREVIEW_ENABLED
+#if AGV_TRAJECTORY_TRACE_ENABLED
+            resetTrajectoryTrace();
+#endif
             trajectoryStore.clear();
 #endif
         };
@@ -272,6 +331,18 @@ namespace
                     last.leftMm,
                     last.headingRad);
                 Serial.println("[SAFE] PWM=0 STBY=LOW; BOOT cannot execute trajectory");
+#if AGV_TRAJECTORY_TRACE_ENABLED
+                const TrajectoryFollowerTrace::State traceState =
+                    trajectoryTrace.begin(trajectory);
+                lastLoggedTraceState = traceState;
+                Serial.printf(
+                    "[TRACE] GEOMETRY_ONLY routeID=%lu waypoints=%u; "
+                    "no speed/PWM/pose simulation\n",
+                    static_cast<unsigned long>(trajectory.routeID),
+                    trajectory.waypointCount);
+                if (traceState != TrajectoryFollowerTrace::State::ANALYZING)
+                    logTrajectoryTraceSummary();
+#endif
             }
         };
 #endif
@@ -280,6 +351,9 @@ namespace
         {
             routeExecutor.cancelRoute();
 #if AGV_TRAJECTORY_PREVIEW_ENABLED
+#if AGV_TRAJECTORY_TRACE_ENABLED
+            resetTrajectoryTrace();
+#endif
             trajectoryStore.clear();
 #endif
             Serial.println("[SAFE] CANCEL_ROUTE handled; outputs forced safe");
@@ -289,6 +363,9 @@ namespace
         {
             routeExecutor.emergencyStop();
 #if AGV_TRAJECTORY_PREVIEW_ENABLED
+#if AGV_TRAJECTORY_TRACE_ENABLED
+            resetTrajectoryTrace();
+#endif
             trajectoryStore.clear();
 #endif
             Serial.println("[SAFE] EMERGENCY_STOP handled immediately");
@@ -407,6 +484,8 @@ void setup()
     Serial.println("================================");
 #if AGV_RAISED_WHEEL_BUILD
     Serial.println("PHASE 2C: SERVER 30CM RAISED-WHEEL TEST");
+#elif AGV_TRAJECTORY_TRACE_ENABLED
+    Serial.println("PHASE 2E: PURE PURSUIT GEOMETRY TRACE");
 #elif AGV_TRAJECTORY_PREVIEW_ENABLED
     Serial.println("PHASE 2D: TRAJECTORY + ODOMETRY MOTOR-LOCKED PREVIEW");
 #else
@@ -418,6 +497,9 @@ void setup()
     Serial.println("BUILD PROFILE: esp32dev-raised-wheel");
     Serial.println("MOTOR OUTPUTS: ENABLED");
     Serial.println("WARNING: WHEELS MUST REMAIN OFF THE FLOOR");
+#elif AGV_TRAJECTORY_TRACE_ENABLED
+    Serial.println("BUILD PROFILE: esp32dev-trajectory-trace");
+    Serial.println("MOTOR OUTPUTS: COMPILE-LOCKED OFF");
 #elif AGV_TRAJECTORY_PREVIEW_ENABLED
     Serial.println("BUILD PROFILE: esp32dev-trajectory-preview");
     Serial.println("MOTOR OUTPUTS: COMPILE-LOCKED OFF");
@@ -431,6 +513,9 @@ void setup()
 #else
     Serial.println("TRAJECTORY CAPABILITY: NOT ADVERTISED");
 #endif
+#if AGV_TRAJECTORY_TRACE_ENABLED
+    Serial.println("TRACE: GEOMETRY ONLY; NO SPEED/PWM/POSE SIMULATION");
+#endif
 #if AGV_TRAJECTORY_PREVIEW_ENABLED
     Serial.println("ODOMETRY: ROBOT-LOCAL MM/RAD LOG ONLY");
 #else
@@ -439,7 +524,11 @@ void setup()
     Serial.println("STATUS WORLD POSE: UNCHANGED NODE/PROGRESS MODE");
     Serial.println("TB6612 STBY AT BOOT: LOW");
     Serial.println("ARRIVED: SAFE-COMPLETION GATED");
+#if AGV_TRAJECTORY_TRACE_ENABLED
+    Serial.println("BOOT: TRAJECTORY EXECUTION UNAVAILABLE");
+#else
     Serial.println("BOOT REQUIRED BEFORE COUNTDOWN AND MOTION");
+#endif
     Serial.println("================================");
 
     configureCallbacks();
@@ -493,6 +582,12 @@ void loop()
 
     if (networkConfigured)
         robotClient.update();
+
+#if AGV_TRAJECTORY_TRACE_ENABLED
+    // One bounded geometry sample per loop. This never touches odometry,
+    // MotionController, STATUS, ARRIVED, GPIO, or PWM.
+    updateTrajectoryTrace();
+#endif
 
     // RobotClient also invokes onDisconnected before socket cleanup. This
     // second check covers a state change discovered during update().
