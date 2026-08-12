@@ -6,11 +6,20 @@
 class MotionController
 {
 public:
+    enum class Mode : uint8_t
+    {
+        NONE,
+        FORWARD,
+        TURN_CW,
+        TURN_CCW
+    };
+
     enum class StartResult : uint8_t
     {
         STARTED,
         OUTPUT_DISABLED,
         INVALID_TARGET,
+        INVALID_MODE,
         NOT_READY,
         ALREADY_RUNNING,
         FAULT_LATCHED
@@ -40,8 +49,14 @@ public:
 
     struct Snapshot
     {
+        // leftCount/rightCount remain raw-count aliases for existing odometry
+        // callers. New motion code should use the explicitly named fields.
         int32_t leftCount = 0;
         int32_t rightCount = 0;
+        int32_t rawLeftCount = 0;
+        int32_t rawRightCount = 0;
+        int32_t leftProgress = 0;
+        int32_t rightProgress = 0;
         int32_t targetCount = 0;
         int leftPwm = 0;
         int rightPwm = 0;
@@ -54,6 +69,7 @@ public:
         bool completed = false;
         bool faultLatched = false;
         bool outputsSafe = false;
+        Mode mode = Mode::NONE;
         Fault fault = Fault::NONE;
     };
 
@@ -63,6 +79,8 @@ public:
 
     StartResult startForward(int32_t targetCount);
     StartResult startForward(int32_t targetCount, uint32_t nowMs);
+    StartResult startMotion(Mode mode, int32_t targetCount);
+    StartResult startMotion(Mode mode, int32_t targetCount, uint32_t nowMs);
     UpdateResult update(uint32_t nowMs);
 
     // Intentional local/server cancellation removes power immediately without
@@ -100,9 +118,14 @@ private:
                                     int32_t& right,
                                     uint32_t& resetEpoch);
     static void resetEncoderCounts();
+    static void normalizeCounts(Mode mode,
+                                int32_t rawLeft,
+                                int32_t rawRight,
+                                int32_t& leftProgress,
+                                int32_t& rightProgress);
 
     void forceSafeOutputs();
-    void applyForwardOutputs(int leftPwm, int rightPwm);
+    void applyMotionOutputs(Mode mode, int leftPwm, int rightPwm);
     UpdateResult updateSettling(uint32_t nowMs);
     UpdateResult latchFault(Fault cause, uint32_t nowMs);
     void updateVelocity(int32_t leftCount, int32_t rightCount, uint32_t nowMs);
@@ -115,6 +138,7 @@ private:
 
     State m_State = State::NOT_READY;
     Fault m_Fault = Fault::NONE;
+    Mode m_Mode = Mode::NONE;
     bool m_Initialized = false;
     int32_t m_TargetCount = 0;
     int m_LeftPwm = 0;

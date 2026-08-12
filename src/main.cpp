@@ -12,6 +12,8 @@
 #include "TrajectoryFollowerTrace.hpp"
 #endif
 
+#if !AGV_PHYSICAL_FLEET_ENABLED
+
 static_assert(AppConfig::kRaisedWheelBuild
                   == AppConfig::kEnableMotorOutputs,
               "SAFETY FAILURE: build profile and motor output disagree");
@@ -608,3 +610,5 @@ void loop()
 
     delay(2);
 }
+
+#endif // !AGV_PHYSICAL_FLEET_ENABLED

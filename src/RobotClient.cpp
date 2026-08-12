@@ -144,6 +144,9 @@ void RobotClient::connectIfNeeded(uint32_t nowMs)
     Serial.printf("[TCP] Connecting to %s:%u\n", m_ServerHost, m_ServerPort);
     if (!m_Client.connect(m_ServerHost, m_ServerPort))
     {
+        // Some WiFiClient implementations retain a failed socket handle.
+        // Always discard it so the next attempt creates a fresh TCP stream.
+        m_Client.stop();
         Serial.println("[TCP] Connect failed");
         return;
     }

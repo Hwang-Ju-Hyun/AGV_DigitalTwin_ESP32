@@ -4,18 +4,33 @@
 #include "Secrets.hpp"
 
 #if !defined(AGV_RAISED_WHEEL_BUILD) \
-    || !defined(AGV_MOTOR_OUTPUTS_ENABLED)
+    || !defined(AGV_MOTOR_OUTPUTS_ENABLED) \
+    || !defined(AGV_PHYSICAL_FLEET_ENABLED) \
+    || !defined(AGV_PHYSICAL_FLEET_MOTOR_ENABLED)
 #error "Select an explicit PlatformIO motor-safety build profile"
 #endif
 
 #if (AGV_RAISED_WHEEL_BUILD != 0 && AGV_RAISED_WHEEL_BUILD != 1) \
     || (AGV_MOTOR_OUTPUTS_ENABLED != 0 \
-        && AGV_MOTOR_OUTPUTS_ENABLED != 1)
+        && AGV_MOTOR_OUTPUTS_ENABLED != 1) \
+    || (AGV_PHYSICAL_FLEET_ENABLED != 0 \
+        && AGV_PHYSICAL_FLEET_ENABLED != 1) \
+    || (AGV_PHYSICAL_FLEET_MOTOR_ENABLED != 0 \
+        && AGV_PHYSICAL_FLEET_MOTOR_ENABLED != 1)
 #error "Motor-safety build profile values must be 0 or 1"
 #endif
 
-#if AGV_RAISED_WHEEL_BUILD != AGV_MOTOR_OUTPUTS_ENABLED
-#error "Raised-wheel profile and motor-output selection disagree"
+#if AGV_RAISED_WHEEL_BUILD && AGV_PHYSICAL_FLEET_ENABLED
+#error "Raised-wheel demo and physical-fleet modes are mutually exclusive"
+#endif
+
+#if AGV_PHYSICAL_FLEET_MOTOR_ENABLED && !AGV_PHYSICAL_FLEET_ENABLED
+#error "Physical-fleet motor output requires the physical-fleet executor"
+#endif
+
+#if AGV_MOTOR_OUTPUTS_ENABLED \
+    != (AGV_RAISED_WHEEL_BUILD || AGV_PHYSICAL_FLEET_MOTOR_ENABLED)
+#error "Motor-output selection does not match the explicit live profile"
 #endif
 
 namespace AppConfig
@@ -34,11 +49,15 @@ namespace AppConfig
     static constexpr uint32_t kReconnectIntervalMs = 2000;
     static constexpr uint32_t kHelloAckTimeoutMs = 3000;
 
-    // Only the explicit esp32dev-raised-wheel environment sets both values to
-    // true. The default esp32dev environment keeps both compile-time locks off.
+    // Only explicit live profiles may enable motor output. The default
+    // esp32dev environment keeps every motor-output lock off.
     static constexpr bool kRaisedWheelBuild = AGV_RAISED_WHEEL_BUILD != 0;
     static constexpr bool kEnableMotorOutputs =
         AGV_MOTOR_OUTPUTS_ENABLED != 0;
+    static constexpr bool kPhysicalFleetEnabled =
+        AGV_PHYSICAL_FLEET_ENABLED != 0;
+    static constexpr bool kPhysicalFleetMotorBuild =
+        AGV_PHYSICAL_FLEET_MOTOR_ENABLED != 0;
 
     // Only this exact two-node route is accepted in the first physical demo.
     // The current server protocol carries no metric distance, so [1 -> 2]
@@ -49,6 +68,14 @@ namespace AppConfig
     static constexpr uint32_t kEncoderSettleStableMs = 150;
     static constexpr uint32_t kEncoderSettleTimeoutMs = 2000;
     static constexpr uint32_t kApprovalCountdownMs = 5000;
+    static constexpr uint32_t kPrimitiveSafePauseMs = 500;
+    static constexpr uint32_t kPhysicalFleetStartNodeID = 1;
+    static constexpr float kPhysicalFleetStartHeadingRad = 0.0f;
+    static constexpr float kPhysicalFleetScaleMmPerMapUnit = 50.0f;
+    static constexpr float kPhysicalFleetCruiseSpeedMmPerSecond = 80.0f;
+    static constexpr float kForwardCountsPerMm = 520.0f / 300.0f;
+    static constexpr float kTurnCountsPerRadian =
+        176.0f / 1.57079632679489661923f;
     static constexpr int kBootButtonPin = 0;
     static constexpr uint32_t kButtonDebounceMs = 50;
 
