@@ -1,6 +1,6 @@
 # ESP32Test Current Status
 
-Last reviewed: 2026-08-12
+Last reviewed: 2026-08-19
 
 ## Repository baseline
 
@@ -46,9 +46,9 @@ The active source contains these additional safety gates. The normal target/sett
 - Completion requires both counts to remain at or above target with no encoder activity for at least 150 ms. A 2,000 ms settling limit, wrong direction, count overrun, wheel mismatch, or unsafe output invariant latches a fault.
 - `STATUS` remains on node 1 during `SETTLING`; node 2 and `ARRIVED` remain blocked until settling completes and safe outputs are verified.
 
-## Phase 2C/2D/2E build profiles
+## Build profiles
 
-PlatformIO exposes six explicit compile-time safety profiles:
+PlatformIO exposes fourteen explicit compile-time safety profiles:
 
 - `esp32dev` is the default environment. Both the raised-wheel flag and motor-output flag are `0`, so motor output remains compile-locked off.
 - `esp32dev-trajectory-preview` also has both motor flags at `0`. It advertises the preview capability and can parse, validate, and retain a versioned trajectory without exposing an execution path.
@@ -56,11 +56,17 @@ PlatformIO exposes six explicit compile-time safety profiles:
 - `esp32dev-raised-wheel` remains the explicit legacy exact-route motor profile, allowing the guarded 520-count path to energize the TB6612 after route acceptance, local BOOT approval, and the five-second countdown.
 - `esp32dev-physical-fleet-locked` compiles the TestCase0 executor but advertises no execution capability and keeps the bridge locked.
 - `esp32dev-physical-fleet` is the explicit live LINE/point-turn profile described in Phase 2F.
+- `esp32dev-straight-calibration-locked` compiles the isolated one-shot straight test while keeping every motor output locked.
+- `esp32dev-straight-calibration` is the explicit network-free live calibration profile: BOOT plus five seconds permits one 520-count forward run, then a reboot is required.
+- `esp32dev-turn-calibration-locked` compiles the isolated quarter-turn test while keeping every motor output locked.
+- `esp32dev-turn-calibration-cw` and `esp32dev-turn-calibration-ccw` each permit one network-free 176-count point turn after BOOT plus five seconds, then require a reboot.
+- `esp32dev-channel-diagnostic-locked` is a USB-only manual encoder mapper with no reachable motor-output path.
+- `esp32dev-channel-diagnostic-a` and `esp32dev-channel-diagnostic-b` each allow one network-free, raised-wheel-only 300 ms pulse on only the selected TB6612 channel after BOOT plus five seconds. Both finish with PWM zero and `STBY=LOW` and require a reboot.
 - Missing, non-binary, or mismatched profile flags stop compilation. Profile-specific `static_assert` checks independently verify every locked or live build.
 - The raised-wheel boot banner explicitly reports `MOTOR OUTPUTS: ENABLED` and warns that the wheels must remain off the floor. The default banner explicitly reports the motor lock.
 - The legacy exact-route profiles retain their prior GPIO, encoder polarity, 520-count target, BOOT gates, settling, and ARRIVED behavior. Phase 2F extends `MotionController` with separately gated point-turn modes.
 
-Both profiles have been compiled and uploaded to the physical ESP32. The default locked profile was reconfirmed with motor power isolated, and the raised-wheel profile completed the guarded 520-count path described below.
+The earlier default locked and raised-wheel profiles were compiled and uploaded to the physical ESP32. The default locked profile was reconfirmed with motor power isolated, and the raised-wheel profile completed the guarded 520-count path described below. The isolated channel and straight-calibration profiles have also been exercised as recorded below. The new turn-calibration profiles remain build-only.
 
 ## Confirmed Phase 2C raised-wheel end-to-end result
 
@@ -133,7 +139,15 @@ Server `df9d6410e325bd57ca4bc59f828e694ba7ff88a7` defines a 15-node/44-link LINE
 
 The BOOT approval also confirms that an operator placed the chassis at node 1 facing east. A reboot or latched stop requires physical repositioning before approval; there is no automatic relocalization.
 
-The default and `esp32dev-physical-fleet-locked` profiles keep motor output compile-locked. No Phase 2F firmware has been uploaded or physically run. Arbitrary-distance repeatability, CCW use of the shared turn PWM profile, 80 mm/s schedule matching, and indefinite automatic-fleet operation remain unverified.
+The default and `esp32dev-physical-fleet-locked` profiles keep motor output compile-locked. A crossed/intermittent drive-channel mapping was isolated and corrected before the latest straight tests. Automatic fleet testing remains paused until the standalone point turns are checked. Arbitrary-distance repeatability, CCW use of the shared turn PWM profile, 80 mm/s schedule matching, and indefinite automatic-fleet operation remain unverified.
+
+## Straight calibration diagnostics
+
+The straight-calibration profiles do not use Wi-Fi, TCP, Server routes, STATUS, or ARRIVED. During the one-shot run they buffer left/right count deltas, calculated counts/s, cumulative count difference, and applied PWM every 50 ms. Serial CSV output begins only after completion, fault, or E-stop has made PWM zero and `STBY=LOW`. After the wiring correction, a raised-wheel run completed at `L=541/R=531`, and a floor run completed straight at `L=531/R=531`; both reported `fault=0` and safe outputs.
+
+The separate channel diagnostic does not use `MotionController`, straight synchronization, Server code, or credentials. Its locked build can map encoders by hand. After correction, channel A drove the physical left wheel forward and reported `L=65/R=0`; channel B drove the physical right wheel forward and reported `L=0/R=105`.
+
+The turn-calibration profiles reuse the guarded `MotionController` point-turn path but remain isolated from networking. They request one 176-count CW or CCW turn, settle with outputs safe, buffer raw and normalized encoder samples, print only after stop, and require reboot before another run.
 
 ## Firmware currently built
 
@@ -148,8 +162,11 @@ The active PlatformIO firmware is now split into these responsibilities:
 - `src/TrajectoryFollowerTrace.cpp`: motor-independent, bounded Pure Pursuit geometry analysis.
 - `src/PhysicalFleetAuthorization.cpp`: pre-network BOOT/countdown authorization and reboot-latched local E-stop state.
 - `src/PhysicalFleetExecutor.cpp`: strict LINE/point-turn waypoint execution, per-node settling, STATUS, and ARRIVED sequencing.
+- `src/StraightCalibrationMain.cpp`: isolated BOOT-gated, one-shot 30 cm encoder-speed data capture with post-stop CSV output.
+- `src/TurnCalibrationMain.cpp`: isolated BOOT-gated, one-shot 176-count CW/CCW point-turn capture with post-stop output.
+- `src/MotorChannelDiagnosticMain.cpp`: isolated manual encoder mapper and compile-selected, single-channel 300 ms raised-wheel pulse diagnostic.
 - `src/main.cpp` and `src/PhysicalFleetMain.cpp`: profile-specific callback wiring and non-blocking safety/network loops.
-- `platformio.ini`: selects the default locked, preview/trace, legacy raised-wheel, or TestCase0 fleet profiles.
+- `platformio.ini`: selects the default locked, preview/trace, legacy raised-wheel, TestCase0 fleet, or isolated straight/turn/channel diagnostic profiles.
 
 The only accepted physical-demo interpretation remains:
 
@@ -165,7 +182,7 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 ## Safety state and invariants
 
 - The default `esp32dev` environment compiles `AppConfig::kEnableMotorOutputs=false` and remains the safe target for a bare `platformio run`.
-- Motor output is enabled only by the explicit legacy `esp32dev-raised-wheel` or live `esp32dev-physical-fleet` profile; all routine/default builds remain locked.
+- Motor output is enabled only by an explicit legacy raised-wheel, live physical-fleet, live straight-calibration, live turn-calibration, or live channel-diagnostic profile; all routine/default and `*-locked` builds remain locked.
 - `esp32dev-trajectory-preview` is independently asserted to remain motor-locked; trajectory receipt cannot reach a motor-start API.
 - `esp32dev-trajectory-trace` is independently asserted to require preview mode while both motor-output and raised-wheel flags remain false.
 - `src/main.cpp` retains compile-time assertions for both profiles, and `Config.hpp` rejects missing, invalid, or mismatched profile flags.
@@ -209,6 +226,12 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 ## Build validation
 
+- On 2026-08-19, the authorization host assertions and all fourteen PlatformIO builds passed without upload. The new turn locked build used 27,944 bytes RAM / 282,297 bytes flash; each CW/CCW live build used 27,944 bytes RAM / 283,445 bytes flash.
+
+- On 2026-08-18, the default motor-locked environment and all three channel-diagnostic environments built successfully without upload. The locked diagnostic used 22,104 bytes RAM / 279,769 bytes flash; each A/B live diagnostic used 22,104 bytes RAM / 279,865 bytes flash.
+
+- On 2026-08-13, the authorization host assertions passed and all eight PlatformIO environments built successfully without upload. The isolated locked/live calibration builds used 30,512 bytes RAM and 282,613/283,721 bytes flash respectively.
+
 - On 2026-08-12, the BOOT/countdown host assertions passed and all six PlatformIO environments built successfully without upload. The final live physical-fleet build used 47,228 bytes RAM and 780,481 bytes flash.
 
 - On 2026-08-11, the Phase 2E worktree passed the host geometry assertions and all four PlatformIO builds without upload.
@@ -241,7 +264,8 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 - Matching the Server's requested 80 mm/s; Phase 2F currently uses the existing empirical PWM profile rather than closed-loop metric speed control
 - Recovery/relocalization after a mid-edge stop or reboot, and accepted-but-half-open TCP detection
 - Physical 50 mm/map-unit calibration; Bezier execution remains intentionally excluded
+- Standalone 176-count CW/CCW results and measured floor angle; CCW still uses the shared, not-yet-physically-verified PWM profile
 
 ## Next safe step
 
-Review the Phase 2F diff, then upload only after the user explicitly selects either the locked or live physical-fleet profile. The vehicle must start at TestCase0 node 1 facing east; the live profile can begin automatic jobs after the one-time BOOT countdown.
+If the user approves upload, upload `esp32dev-turn-calibration-locked` with all motor power isolated and confirm its BOOT-approved run stays at PWM zero and `STBY=LOW`. Only after that check, upload the CW live profile with both wheels raised; no Server or Unity process is needed.

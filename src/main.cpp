@@ -12,7 +12,9 @@
 #include "TrajectoryFollowerTrace.hpp"
 #endif
 
-#if !AGV_PHYSICAL_FLEET_ENABLED
+#if !AGV_PHYSICAL_FLEET_ENABLED \
+    && !AGV_STRAIGHT_CALIBRATION_ENABLED \
+    && !AGV_TURN_CALIBRATION_ENABLED
 
 static_assert(AppConfig::kRaisedWheelBuild
                   == AppConfig::kEnableMotorOutputs,
@@ -611,4 +613,4 @@ void loop()
     delay(2);
 }
 
-#endif // !AGV_PHYSICAL_FLEET_ENABLED
+#endif // default/network entrypoint selection
