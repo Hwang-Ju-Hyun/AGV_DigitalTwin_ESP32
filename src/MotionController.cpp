@@ -18,10 +18,9 @@ namespace
     constexpr float kForwardSyncKp = 0.25f;
     constexpr int kForwardSyncCorrectionLimit = 15;
 
-    // Clockwise values are preserved from the physically verified L-route.
-    // Counterclockwise uses the same conservative profile; its direction and
-    // encoder polarity/count were verified, but this exact PWM profile has not
-    // been physically validated counterclockwise.
+    // Turn PWM values are preserved from the physically verified L-route.
+    // Direction pins below use the Server convention: positive heading is a
+    // physical counterclockwise turn when viewed from above.
     constexpr int kTurnLeftCruisePwm = 58;
     constexpr int kTurnRightCruisePwm = 63;
     constexpr int kTurnLeftMidPwm = 50;
@@ -183,13 +182,15 @@ void MotionController::normalizeCounts(Mode mode,
             break;
 
         case Mode::TURN_CW:
-            leftProgress = -rawLeft;
-            rightProgress = rawRight;
+            // Physical CW: left wheel forward, right wheel reverse.
+            leftProgress = rawLeft;
+            rightProgress = -rawRight;
             break;
 
         case Mode::TURN_CCW:
-            leftProgress = rawLeft;
-            rightProgress = -rawRight;
+            // Physical CCW: left wheel reverse, right wheel forward.
+            leftProgress = -rawLeft;
+            rightProgress = rawRight;
             break;
 
         case Mode::NONE:
@@ -738,17 +739,19 @@ void MotionController::applyMotionOutputs(Mode mode, int leftPwm, int rightPwm)
             break;
 
         case Mode::TURN_CW:
-            digitalWrite(AppConfig::kLeftMotorIn1Pin, HIGH);
-            digitalWrite(AppConfig::kLeftMotorIn2Pin, LOW);
-            digitalWrite(AppConfig::kRightMotorIn1Pin, HIGH);
-            digitalWrite(AppConfig::kRightMotorIn2Pin, LOW);
-            break;
-
-        case Mode::TURN_CCW:
+            // Left forward, right reverse rotates the chassis clockwise.
             digitalWrite(AppConfig::kLeftMotorIn1Pin, LOW);
             digitalWrite(AppConfig::kLeftMotorIn2Pin, HIGH);
             digitalWrite(AppConfig::kRightMotorIn1Pin, LOW);
             digitalWrite(AppConfig::kRightMotorIn2Pin, HIGH);
+            break;
+
+        case Mode::TURN_CCW:
+            // Left reverse, right forward rotates the chassis counterclockwise.
+            digitalWrite(AppConfig::kLeftMotorIn1Pin, HIGH);
+            digitalWrite(AppConfig::kLeftMotorIn2Pin, LOW);
+            digitalWrite(AppConfig::kRightMotorIn1Pin, HIGH);
+            digitalWrite(AppConfig::kRightMotorIn2Pin, LOW);
             break;
 
         case Mode::NONE:

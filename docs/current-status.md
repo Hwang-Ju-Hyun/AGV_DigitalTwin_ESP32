@@ -1,6 +1,6 @@
 # ESP32Test Current Status
 
-Last reviewed: 2026-08-19
+Last reviewed: 2026-08-30
 
 ## Repository baseline
 
@@ -139,7 +139,7 @@ Server `df9d6410e325bd57ca4bc59f828e694ba7ff88a7` defines a 15-node/44-link LINE
 
 The BOOT approval also confirms that an operator placed the chassis at node 1 facing east. A reboot or latched stop requires physical repositioning before approval; there is no automatic relocalization.
 
-The default and `esp32dev-physical-fleet-locked` profiles keep motor output compile-locked. A crossed/intermittent drive-channel mapping was isolated and corrected before the latest straight tests. Automatic fleet testing remains paused until the standalone point turns are checked. Arbitrary-distance repeatability, CCW use of the shared turn PWM profile, 80 mm/s schedule matching, and indefinite automatic-fleet operation remain unverified.
+The default and `esp32dev-physical-fleet-locked` profiles keep motor output compile-locked. A crossed/intermittent drive-channel mapping was isolated and corrected before the latest straight tests. On 2026-08-30, the physical CW/CCW mode mapping was corrected after an east-facing AGV followed a Server CCW command toward the south; the user then confirmed the integrated Server/Vision/ESP32 run moved in the intended direction. Distance and turn-angle repeatability, 80 mm/s schedule matching, and indefinite automatic-fleet operation remain unverified.
 
 ## Straight calibration diagnostics
 
@@ -260,7 +260,7 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 - Calibrated and repeatable floor distance for the nominal 520-count/30 cm segment
 - The future policy for detecting an accepted but half-open TCP session; M4 intentionally does not treat Server silence as a fault
 - Exactly-once Server processing of the safe-completion `ARRIVED`; the firmware's terminal `ARRIVAL_REPORTED` state was observed, but a separate Server-side exactly-once audit was not captured
-- Phase 2F arbitrary-distance LINE repeatability, CCW shared-PWM behavior, point turns, and complete multi-node execution on hardware
+- Phase 2F distance/turn-angle repeatability and indefinite multi-node execution on hardware
 - Matching the Server's requested 80 mm/s; Phase 2F currently uses the existing empirical PWM profile rather than closed-loop metric speed control
 - Recovery/relocalization after a mid-edge stop or reboot, and accepted-but-half-open TCP detection
 - Physical 50 mm/map-unit calibration; Bezier execution remains intentionally excluded
@@ -268,4 +268,4 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 ## Next safe step
 
-If the user approves upload, upload `esp32dev-turn-calibration-locked` with all motor power isolated and confirm its BOOT-approved run stays at PWM zero and `STBY=LOW`. Only after that check, upload the CW live profile with both wheels raised; no Server or Unity process is needed.
+Repeat both isolated CW/CCW point turns and one fixed 350 mm edge with an operator beside the vehicle. Only after those repeatability checks should indefinite automatic-fleet operation resume.
