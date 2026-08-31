@@ -99,8 +99,10 @@ namespace RobotProtocol
         case PacketID::ROUTE_COMMAND:
         case PacketID::CANCEL_ROUTE:
         case PacketID::TRAJECTORY_COMMAND:
+        case PacketID::NODE_CORRECTION_COMMAND:
         case PacketID::STATUS:
         case PacketID::ARRIVED:
+        case PacketID::NODE_CORRECTION_REPORT:
         case PacketID::PING:
         case PacketID::PONG:
         case PacketID::HELLO:
@@ -261,6 +263,46 @@ namespace RobotProtocol
         }
 
         return reader.remaining() == 0;
+    }
+
+    bool readNodeCorrectionCommandPayload(
+        PacketReader& reader,
+        NodeCorrectionCommandPayload& outPayload)
+    {
+        outPayload = {};
+        uint8_t rawAction = 0;
+        if (!reader.readUInt32(outPayload.routeID)
+            || !reader.readUInt32(outPayload.nodeID)
+            || !reader.readUInt32(outPayload.commandID)
+            || !reader.readUInt8(rawAction)
+            || !reader.readFloat(outPayload.magnitude)
+            || !std::isfinite(outPayload.magnitude)
+            || reader.remaining() != 0)
+        {
+            return false;
+        }
+
+        switch (static_cast<NodeCorrectionAction>(rawAction))
+        {
+        case NodeCorrectionAction::DRIVE_FORWARD:
+        case NodeCorrectionAction::TURN_CW:
+        case NodeCorrectionAction::TURN_CCW:
+            outPayload.action = static_cast<NodeCorrectionAction>(rawAction);
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    void writeNodeCorrectionReportPayload(
+        PacketWriter& writer,
+        const NodeCorrectionReportPayload& payload)
+    {
+        writer.writeUInt32(payload.routeID);
+        writer.writeUInt32(payload.nodeID);
+        writer.writeUInt32(payload.commandID);
+        writer.writeUInt8(static_cast<uint8_t>(payload.result));
+        writer.writeUInt32(payload.detail);
     }
 
     void writeErrorPayload(PacketWriter& writer, const ErrorPayload& payload)

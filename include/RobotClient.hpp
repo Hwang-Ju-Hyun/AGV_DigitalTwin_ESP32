@@ -31,6 +31,8 @@ public:
     uint32_t agvID() const { return m_AgvID; }
     bool sendStatus(const RobotProtocol::StatusPayload& status);
     bool sendArrived(uint32_t currentNodeID);
+    bool sendNodeCorrectionReport(
+        const RobotProtocol::NodeCorrectionReportPayload& report);
     bool sendPong(uint32_t timestampMs);
     bool sendError(RobotProtocol::ErrorCode errorCode, uint32_t detail);
 
@@ -40,6 +42,9 @@ public:
     std::function<void(
         const RobotProtocol::TrajectoryCommandPayload& trajectory)>
         onTrajectoryCommand;
+    std::function<void(
+        const RobotProtocol::NodeCorrectionCommandPayload& correction)>
+        onNodeCorrectionCommand;
     std::function<void()> onCancelRoute;
     std::function<void()> onEmergencyStop;
 

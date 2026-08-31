@@ -105,7 +105,8 @@ namespace
         }
 
         const uint32_t capability = AppConfig::kPhysicalFleetMotorBuild
-            ? RobotProtocol::CAPABILITY_TRAJECTORY_COMMAND
+            ? (RobotProtocol::CAPABILITY_TRAJECTORY_COMMAND
+               | RobotProtocol::CAPABILITY_NODE_CORRECTION)
             : RobotProtocol::CAPABILITY_NONE;
         robotClient.begin(AppConfig::kWifiSsid,
                           AppConfig::kWifiPassword,
@@ -114,8 +115,8 @@ namespace
                           AppConfig::kRequestedAgvID,
                           capability);
         networkStarted = true;
-        if (capability == RobotProtocol::CAPABILITY_TRAJECTORY_COMMAND)
-            Serial.println("[ARMED] TCP enabled; COMMAND HELLO will start automatic dispatch");
+        if ((capability & RobotProtocol::CAPABILITY_TRAJECTORY_COMMAND) != 0)
+            Serial.println("[ARMED] TCP enabled; trajectory + node correction ready");
         else
             Serial.println("[LOCKED] TCP enabled without COMMAND capability");
     }
@@ -182,6 +183,22 @@ namespace
                 PhysicalFleetExecutor::acceptResultName(result));
         };
 
+        robotClient.onNodeCorrectionCommand = [](
+            const RobotProtocol::NodeCorrectionCommandPayload& correction)
+        {
+            const auto result = fleetExecutor.acceptNodeCorrection(
+                correction, sessionReady(), millis());
+            Serial.printf(
+                "[FLEET] correction routeID=%lu node=%lu commandID=%lu "
+                "action=%u magnitude=%.3f result=%s\n",
+                static_cast<unsigned long>(correction.routeID),
+                static_cast<unsigned long>(correction.nodeID),
+                static_cast<unsigned long>(correction.commandID),
+                static_cast<unsigned>(correction.action),
+                correction.magnitude,
+                PhysicalFleetExecutor::correctionAcceptResultName(result));
+        };
+
         robotClient.onCancelRoute = []()
         {
             fleetExecutor.cancel();
@@ -239,6 +256,37 @@ namespace
             motion.leftPwm,
             motion.rightPwm,
             digitalRead(AppConfig::kMotorStandbyPin) == LOW ? "LOW" : "HIGH");
+    }
+
+    void sendCorrectionReportIfReady()
+    {
+        RobotProtocol::NodeCorrectionReportPayload report;
+        if (!sessionReady()
+            || !fleetExecutor.correctionReportPending(report))
+        {
+            return;
+        }
+
+        // The Server builds the next one-edge trajectory from the latest
+        // robot heading. Keep this STATUS ahead of the completion report on
+        // the same TCP stream so a completed correction turn cannot race the
+        // next edge dispatch.
+        const bool statusSent = robotClient.sendStatus(
+            fleetExecutor.buildStatus());
+        const bool sent = statusSent &&
+            robotClient.sendNodeCorrectionReport(report);
+        fleetExecutor.markCorrectionReportSendResult(sent);
+        if (sent)
+        {
+            Serial.printf(
+                "[RobotProtocol] CORRECTION_REPORT routeID=%lu node=%lu "
+                "commandID=%lu result=%u detail=%lu\n",
+                static_cast<unsigned long>(report.routeID),
+                static_cast<unsigned long>(report.nodeID),
+                static_cast<unsigned long>(report.commandID),
+                static_cast<unsigned>(report.result),
+                static_cast<unsigned long>(report.detail));
+        }
     }
 
     void reportFaultIfNeeded()
@@ -358,6 +406,7 @@ void loop()
     logStateTransition();
     if (sessionReady())
     {
+        sendCorrectionReportIfReady();
         reportFaultIfNeeded();
         sendArrivalIfReady(millis());
         sendStatusIfDue(millis());

@@ -16,7 +16,10 @@ public:
         RUNNING,
         SETTLING,
         ARRIVAL_PENDING,
-        COMPLETE,
+        NODE_WAIT,
+        CORRECTION_RUNNING,
+        CORRECTION_SETTLING,
+        CORRECTION_REPORT_PENDING,
         OUTPUT_LOCKED,
         FAULT_LATCHED,
         ESTOP_LATCHED
@@ -25,6 +28,16 @@ public:
     enum class AcceptResult : uint8_t
     {
         STORED,
+        DUPLICATE_IGNORED,
+        REJECTED_INVALID,
+        REJECTED_SESSION_NOT_READY,
+        REJECTED_BUSY,
+        REJECTED_LATCHED
+    };
+
+    enum class CorrectionAcceptResult : uint8_t
+    {
+        STARTED,
         DUPLICATE_IGNORED,
         REJECTED_INVALID,
         REJECTED_SESSION_NOT_READY,
@@ -42,7 +55,9 @@ public:
         MOTION_START_FAILED,
         MOTION_CONTROLLER,
         OUTPUTS_NOT_SAFE,
-        ARRIVED_SEND_FAILED
+        ARRIVED_SEND_FAILED,
+        INVALID_CORRECTION,
+        CORRECTION_REPORT_SEND_FAILED
     };
 
     explicit PhysicalFleetExecutor(MotionController& motion);
@@ -52,6 +67,10 @@ public:
         const RobotProtocol::TrajectoryCommandPayload& command,
         bool sessionReady,
         uint32_t nowMs);
+    CorrectionAcceptResult acceptNodeCorrection(
+        const RobotProtocol::NodeCorrectionCommandPayload& command,
+        bool sessionReady,
+        uint32_t nowMs);
     void update(uint32_t nowMs, bool sessionReady);
     void cancel();
     void onNetworkLost();
@@ -59,6 +78,9 @@ public:
 
     bool arrivalPending(uint32_t& outNodeID) const;
     void markArrivedSendResult(bool sent, uint32_t nowMs);
+    bool correctionReportPending(
+        RobotProtocol::NodeCorrectionReportPayload& outReport) const;
+    void markCorrectionReportSendResult(bool sent);
     RobotProtocol::StatusPayload buildStatus() const;
 
     State state() const { return m_State; }
@@ -71,6 +93,8 @@ public:
 
     static const char* stateName(State state);
     static const char* acceptResultName(AcceptResult result);
+    static const char* correctionAcceptResultName(
+        CorrectionAcceptResult result);
     static const char* faultName(Fault fault);
 
 private:
@@ -78,7 +102,9 @@ private:
     {
         NONE,
         DRIVE,
-        TURN
+        TURN,
+        CORRECTION_DRIVE,
+        CORRECTION_TURN
     };
 
     static bool hasFlag(const RobotProtocol::TrajectoryWaypoint& waypoint,
@@ -89,10 +115,24 @@ private:
         const RobotProtocol::TrajectoryCommandPayload& rhs);
     static bool validateCommand(
         const RobotProtocol::TrajectoryCommandPayload& command);
+    static bool correctionCommandEquals(
+        const RobotProtocol::NodeCorrectionCommandPayload& lhs,
+        const RobotProtocol::NodeCorrectionCommandPayload& rhs);
 
     void startCurrentWaypoint(uint32_t nowMs);
     void startTurnQuarter(uint32_t nowMs);
     void handleMotionComplete(uint32_t nowMs);
+    void stageCorrectionReport(
+        RobotProtocol::NodeCorrectionResult result,
+        uint32_t detail,
+        State nextState);
+    void stageCorrectionReportFor(
+        const RobotProtocol::NodeCorrectionCommandPayload& command,
+        RobotProtocol::NodeCorrectionResult result,
+        uint32_t detail,
+        State nextState);
+    void stageActiveCorrectionFault(uint32_t detail);
+    void resetCorrectionSession(uint32_t completedRouteID);
     void clearCommand();
     void latchFault(Fault fault, uint32_t detail);
     bool terminalLatch() const;
@@ -107,6 +147,7 @@ private:
     uint32_t m_CurrentNodeID = 0;
     uint32_t m_TargetNodeID = 0;
     uint32_t m_ArrivalNodeID = 0;
+    uint32_t m_LastCompletedRouteID = 0;
     uint32_t m_PauseStartedMs = 0;
     PrimitiveKind m_Primitive = PrimitiveKind::NONE;
     MotionController::Mode m_MotionMode = MotionController::Mode::NONE;
@@ -118,4 +159,12 @@ private:
     float m_TurnQuarterDirectionRad = 0.0f;
     float m_CommandOriginWorldHeadingRad = 0.0f;
     float m_WorldHeadingRad = 0.0f;
+    float m_ActiveCorrectionHeadingDeltaRad = 0.0f;
+    uint8_t m_CorrectionPrimitiveCount = 0;
+    bool m_HasLastCorrectionCommand = false;
+    RobotProtocol::NodeCorrectionCommandPayload m_LastCorrectionCommand{};
+    bool m_HasPendingCorrectionReport = false;
+    RobotProtocol::NodeCorrectionReportPayload m_PendingCorrectionReport{};
+    uint32_t m_CorrectionStartedMs = 0;
+    State m_AfterCorrectionReportState = State::NODE_WAIT;
 };

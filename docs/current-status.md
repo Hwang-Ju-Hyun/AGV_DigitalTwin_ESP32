@@ -141,6 +141,17 @@ The BOOT approval also confirms that an operator placed the chassis at node 1 fa
 
 The default and `esp32dev-physical-fleet-locked` profiles keep motor output compile-locked. A crossed/intermittent drive-channel mapping was isolated and corrected before the latest straight tests. On 2026-08-30, the physical CW/CCW mode mapping was corrected after an east-facing AGV followed a Server CCW command toward the south; the user then confirmed the integrated Server/Vision/ESP32 run moved in the intended direction. Distance and turn-angle repeatability, 80 mm/s schedule matching, and indefinite automatic-fleet operation remain unverified.
 
+## Vision node-correction integration (build-only)
+
+The integration branch now adds bounded post-arrival correction primitives to the live physical-fleet profile. This path has not been uploaded or exercised on hardware.
+
+- The live profile advertises `CAPABILITY_NODE_CORRECTION` together with trajectory execution; the locked profile advertises neither capability.
+- `NODE_CORRECTION_COMMAND=103` accepts only `DRIVE_FORWARD`, `TURN_CW`, or `TURN_CCW` after a final one-edge trajectory has sent `ARRIVED` and the executor is safely stopped in `NODE_WAIT`.
+- Every command is bound to the just-completed route ID and current node ID. Command IDs are monotonic and exact duplicates are idempotent.
+- A primitive is limited to 20--120 mm or 5--90 degrees, with at most six accepted primitives for one completed edge. Correction motion reuses the existing encoder settling, output-invariant, disconnect, BOOT E-stop, and motion-fault gates.
+- `NODE_CORRECTION_REPORT=202` returns `COMPLETED`, `REJECTED`, or `FAULT`. A correction turn updates the ESP32 status heading by the commanded signed angle; correction motion does not alter the completed node or the stored route-local forward/left coordinates. The firmware sends a fresh final `STATUS` before the report on the same TCP stream so the Server observes the corrected heading before planning the next edge.
+- The matching Server integration must dispatch final one-edge trajectories, treat their normal `ARRIVED` as the coarse node-ready point, issue correction primitives from fresh verified Vision measurements, and dispatch the next edge only after correction completes or is unnecessary.
+
 ## Straight calibration diagnostics
 
 The straight-calibration profiles do not use Wi-Fi, TCP, Server routes, STATUS, or ARRIVED. During the one-shot run they buffer left/right count deltas, calculated counts/s, cumulative count difference, and applied PWM every 50 ms. Serial CSV output begins only after completion, fault, or E-stop has made PWM zero and `STBY=LOW`. After the wiring correction, a raised-wheel run completed at `L=541/R=531`, and a floor run completed straight at `L=531/R=531`; both reported `fault=0` and safe outputs.

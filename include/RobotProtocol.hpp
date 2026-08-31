@@ -15,6 +15,8 @@ namespace RobotProtocol
     constexpr uint16_t kMaxFrameSize = 2048;
     constexpr uint16_t kTrajectoryFixedPayloadSize = 19;
     constexpr uint16_t kTrajectoryWaypointWireSize = 21;
+    constexpr uint16_t kNodeCorrectionCommandPayloadSize = 17;
+    constexpr uint16_t kNodeCorrectionReportPayloadSize = 17;
     constexpr uint16_t kMaxTrajectoryPayloadSize =
         kTrajectoryFixedPayloadSize
         + kMaxTrajectoryWaypoints * kTrajectoryWaypointWireSize;
@@ -30,7 +32,10 @@ namespace RobotProtocol
         // current firmware.
         CAPABILITY_TRAJECTORY_COMMAND = 1u << 0,
         // Parse/validate/store only. This cannot start any motor path.
-        CAPABILITY_TRAJECTORY_PREVIEW = 1u << 1
+        CAPABILITY_TRAJECTORY_PREVIEW = 1u << 1,
+        // Accept bounded Server-authorized correction primitives only after
+        // a completed trajectory has safely reported its final ARRIVED.
+        CAPABILITY_NODE_CORRECTION = 1u << 2
     };
 
     enum class ClientType : uint8_t
@@ -47,8 +52,10 @@ namespace RobotProtocol
         ROUTE_COMMAND = 100,
         CANCEL_ROUTE = 101,
         TRAJECTORY_COMMAND = 102,
+        NODE_CORRECTION_COMMAND = 103,
         STATUS = 200,
         ARRIVED = 201,
+        NODE_CORRECTION_REPORT = 202,
         PING = 300,
         PONG = 301,
         HELLO = 400,
@@ -130,6 +137,61 @@ namespace RobotProtocol
         uint32_t finalNodeID = 0;
         float millimetersPerMapUnit = 0.0f;
         TrajectoryWaypoint waypoints[kMaxTrajectoryWaypoints];
+    };
+
+    enum class NodeCorrectionAction : uint8_t
+    {
+        DRIVE_FORWARD = 2,
+        TURN_CW = 3,
+        TURN_CCW = 4
+    };
+
+    enum class NodeCorrectionResult : uint8_t
+    {
+        COMPLETED = 2,
+        REJECTED = 3,
+        FAULT = 4
+    };
+
+    static_assert((CAPABILITY_TRAJECTORY_COMMAND
+                   | CAPABILITY_NODE_CORRECTION) == 0x5U,
+                  "Physical-fleet correction capability contract changed");
+    static_assert(static_cast<uint16_t>(PacketID::NODE_CORRECTION_COMMAND)
+                      == 103,
+                  "Correction command packet contract changed");
+    static_assert(static_cast<uint16_t>(PacketID::NODE_CORRECTION_REPORT)
+                      == 202,
+                  "Correction report packet contract changed");
+    static_assert(static_cast<uint8_t>(NodeCorrectionAction::DRIVE_FORWARD)
+                      == 2
+                      && static_cast<uint8_t>(NodeCorrectionAction::TURN_CW)
+                             == 3
+                      && static_cast<uint8_t>(NodeCorrectionAction::TURN_CCW)
+                             == 4,
+                  "Correction action wire contract changed");
+    static_assert(static_cast<uint8_t>(NodeCorrectionResult::COMPLETED) == 2
+                      && static_cast<uint8_t>(NodeCorrectionResult::REJECTED)
+                             == 3
+                      && static_cast<uint8_t>(NodeCorrectionResult::FAULT)
+                             == 4,
+                  "Correction result wire contract changed");
+
+    struct NodeCorrectionCommandPayload
+    {
+        uint32_t routeID = 0;
+        uint32_t nodeID = 0;
+        uint32_t commandID = 0;
+        NodeCorrectionAction action = NodeCorrectionAction::DRIVE_FORWARD;
+        float magnitude = 0.0f;
+    };
+
+    struct NodeCorrectionReportPayload
+    {
+        uint32_t routeID = 0;
+        uint32_t nodeID = 0;
+        uint32_t commandID = 0;
+        NodeCorrectionResult result = NodeCorrectionResult::COMPLETED;
+        uint32_t detail = 0;
     };
 
     struct HelloPayload
@@ -218,6 +280,12 @@ namespace RobotProtocol
     bool readRouteCommandPayload(PacketReader& reader, RouteCommandPayload& outPayload);
     bool readTrajectoryCommandPayload(PacketReader& reader,
                                       TrajectoryCommandPayload& outPayload);
+    bool readNodeCorrectionCommandPayload(
+        PacketReader& reader,
+        NodeCorrectionCommandPayload& outPayload);
+    void writeNodeCorrectionReportPayload(
+        PacketWriter& writer,
+        const NodeCorrectionReportPayload& payload);
     void writeErrorPayload(PacketWriter& writer, const ErrorPayload& payload);
     void writeTimePayload(PacketWriter& writer, const TimePayload& payload);
     bool readTimePayload(PacketReader& reader, TimePayload& outPayload);

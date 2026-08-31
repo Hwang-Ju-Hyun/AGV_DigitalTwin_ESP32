@@ -94,6 +94,17 @@ bool RobotClient::sendArrived(uint32_t currentNodeID)
     return sendPacket(RobotProtocol::PacketID::ARRIVED, payload);
 }
 
+bool RobotClient::sendNodeCorrectionReport(
+    const RobotProtocol::NodeCorrectionReportPayload& report)
+{
+    std::vector<uint8_t> payload;
+    payload.reserve(RobotProtocol::kNodeCorrectionReportPayloadSize);
+    RobotProtocol::PacketWriter writer(payload);
+    RobotProtocol::writeNodeCorrectionReportPayload(writer, report);
+    return sendPacket(RobotProtocol::PacketID::NODE_CORRECTION_REPORT,
+                      payload);
+}
+
 bool RobotClient::sendPong(uint32_t timestampMs)
 {
     RobotProtocol::TimePayload pong;
@@ -322,6 +333,42 @@ void RobotClient::handleBody(const uint8_t* body, size_t length)
             trajectory.waypointCount);
         if (onTrajectoryCommand)
             onTrajectoryCommand(trajectory);
+        break;
+    }
+    case RobotProtocol::PacketID::NODE_CORRECTION_COMMAND:
+    {
+        if (m_SessionState != SessionState::ACCEPTED
+            || header.agvID != m_AgvID)
+        {
+            Serial.println(
+                "[RobotProtocol] Unauthorized NODE_CORRECTION_COMMAND ignored");
+            return;
+        }
+        if ((m_Capabilities & RobotProtocol::CAPABILITY_NODE_CORRECTION) == 0)
+        {
+            Serial.println(
+                "[RobotProtocol] Unsupported NODE_CORRECTION_COMMAND ignored");
+            return;
+        }
+
+        RobotProtocol::NodeCorrectionCommandPayload correction;
+        if (!RobotProtocol::readNodeCorrectionCommandPayload(
+                reader, correction))
+        {
+            Serial.println(
+                "[RobotProtocol] Invalid NODE_CORRECTION_COMMAND");
+            return;
+        }
+        Serial.printf(
+            "[RobotProtocol] CORRECTION routeID=%lu node=%lu "
+            "commandID=%lu action=%u magnitude=%.3f\n",
+            static_cast<unsigned long>(correction.routeID),
+            static_cast<unsigned long>(correction.nodeID),
+            static_cast<unsigned long>(correction.commandID),
+            static_cast<unsigned>(correction.action),
+            correction.magnitude);
+        if (onNodeCorrectionCommand)
+            onNodeCorrectionCommand(correction);
         break;
     }
     case RobotProtocol::PacketID::CANCEL_ROUTE:
