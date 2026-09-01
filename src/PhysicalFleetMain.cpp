@@ -401,7 +401,11 @@ void loop()
     if (fleetExecutor.hasActiveCommand() && !sessionReady())
         fleetExecutor.onNetworkLost();
 
-    fleetExecutor.update(nowMs, sessionReady());
+    // A packet callback can start a correction with a newer millis() value
+    // than the one captured at the top of this loop. Always advance motion
+    // with a timestamp sampled after network callbacks have completed.
+    const uint32_t controlNowMs = millis();
+    fleetExecutor.update(controlNowMs, sessionReady());
 
     logStateTransition();
     if (sessionReady())

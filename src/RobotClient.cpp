@@ -2,6 +2,7 @@
 
 #include "Config.hpp"
 #include <Arduino.h>
+#include <cerrno>
 #include <lwip/sockets.h>
 
 namespace
@@ -10,6 +11,8 @@ namespace
     // cannot be starved by a burst of valid TCP data.
     constexpr size_t kMaxRxBytesPerUpdate = 512;
     constexpr size_t kMaxFramesPerUpdate = 4;
+    constexpr size_t kMaxPendingTxBytes = 4096;
+    constexpr uint32_t kTxStallTimeoutMs = 750;
 }
 
 void RobotClient::begin(const char* ssid,
@@ -27,6 +30,7 @@ void RobotClient::begin(const char* ssid,
     m_Capabilities = capabilities;
     m_AgvID = requestedAgvID;
     m_RxBuffer.reserve(512);
+    m_TxBuffer.reserve(kMaxPendingTxBytes);
 
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
@@ -40,11 +44,19 @@ void RobotClient::update()
     if (!connected())
         return;
 
+    flushOutgoing(millis());
+    if (!connected())
+        return;
+
     readIncoming();
     if (!connected())
         return;
 
     processFrames();
+    if (!connected())
+        return;
+
+    flushOutgoing(millis());
     if (!connected())
         return;
 
@@ -186,10 +198,64 @@ void RobotClient::dropConnection(const char* reason)
 
     m_Client.stop();
     m_RxBuffer.clear();
+    m_TxBuffer.clear();
+    m_TxOffset = 0;
+    m_TxBlockedSinceMs = 0;
     m_AgvID = m_RequestedAgvID;
 
     if (reason != nullptr)
         Serial.println(reason);
+}
+
+void RobotClient::flushOutgoing(uint32_t nowMs)
+{
+    if (!m_SocketActive || !connected() ||
+        m_TxOffset >= m_TxBuffer.size())
+    {
+        if (m_TxOffset >= m_TxBuffer.size())
+        {
+            m_TxBuffer.clear();
+            m_TxOffset = 0;
+            m_TxBlockedSinceMs = 0;
+        }
+        return;
+    }
+
+    const int socketFd = m_Client.fd();
+    if (socketFd < 0)
+    {
+        dropConnection("[TCP] Invalid socket during send; reconnecting");
+        return;
+    }
+
+    const int written = ::send(
+        socketFd,
+        m_TxBuffer.data() + m_TxOffset,
+        m_TxBuffer.size() - m_TxOffset,
+        MSG_DONTWAIT);
+    if (written > 0)
+    {
+        m_TxOffset += static_cast<size_t>(written);
+        m_TxBlockedSinceMs = 0;
+        if (m_TxOffset >= m_TxBuffer.size())
+        {
+            m_TxBuffer.clear();
+            m_TxOffset = 0;
+        }
+        return;
+    }
+
+    if (written < 0 &&
+        (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+    {
+        if (m_TxBlockedSinceMs == 0)
+            m_TxBlockedSinceMs = nowMs;
+        else if (nowMs - m_TxBlockedSinceMs >= kTxStallTimeoutMs)
+            dropConnection("[TCP] TX stalled; reconnecting");
+        return;
+    }
+
+    dropConnection("[TCP] Packet write failed; reconnecting");
 }
 
 void RobotClient::readIncoming()
@@ -402,31 +468,39 @@ bool RobotClient::sendPacket(RobotProtocol::PacketID packetID, const std::vector
         return false;
     }
 
+    const size_t pendingBytes = m_TxBuffer.size() - m_TxOffset;
+    if (packetID == RobotProtocol::PacketID::STATUS && pendingBytes != 0)
+    {
+        // STATUS is periodic. Keep an older queued frame instead of allowing
+        // telemetry to crowd out ARRIVED or correction reports.
+        return true;
+    }
+
     std::vector<uint8_t> frame;
-    if (!RobotProtocol::buildFrame(packetID, m_AgvID, m_NextSequence++, payload, frame))
+    if (!RobotProtocol::buildFrame(packetID, m_AgvID, m_NextSequence, payload, frame))
     {
         dropConnection("[RobotProtocol] Frame build failed; reconnecting");
         return false;
     }
 
-    const int socketFd = m_Client.fd();
-    if (socketFd < 0)
+    if (pendingBytes + frame.size() > kMaxPendingTxBytes)
     {
-        dropConnection("[TCP] Invalid socket during send; reconnecting");
+        dropConnection("[TCP] TX queue limit exceeded; reconnecting");
         return false;
     }
 
-    // Frames are at most 2 KiB. One non-blocking write avoids holding the
-    // application loop while motor safety and encoder checks need service.
-    const int written = ::send(socketFd,
-                               frame.data(),
-                               frame.size(),
-                               MSG_DONTWAIT);
-    if (written == static_cast<int>(frame.size()))
-        return true;
+    if (m_TxOffset != 0)
+    {
+        m_TxBuffer.erase(
+            m_TxBuffer.begin(), m_TxBuffer.begin() + m_TxOffset);
+        m_TxOffset = 0;
+    }
+    m_TxBuffer.insert(m_TxBuffer.end(), frame.begin(), frame.end());
+    ++m_NextSequence;
 
-    // A partial frame cannot be retried safely while preserving a bounded
-    // safety loop, so close this TCP stream and start a clean session.
-    dropConnection("[TCP] Packet write incomplete; reconnecting");
-    return false;
+    // Try immediately, but retain a partial frame for later bounded flushes.
+    // A real write failure or a sustained stall still drops the connection,
+    // which invokes the existing fail-safe motion stop.
+    flushOutgoing(millis());
+    return m_SocketActive;
 }

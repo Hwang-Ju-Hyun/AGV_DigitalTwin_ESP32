@@ -172,7 +172,7 @@ The active PlatformIO firmware is now split into these responsibilities:
 - `src/TrajectoryCommandStore.cpp`: non-driving trajectory validation, duplicate handling, and bounded storage.
 - `src/TrajectoryFollowerTrace.cpp`: motor-independent, bounded Pure Pursuit geometry analysis.
 - `src/PhysicalFleetAuthorization.cpp`: pre-network BOOT/countdown authorization and reboot-latched local E-stop state.
-- `src/PhysicalFleetExecutor.cpp`: strict LINE/point-turn waypoint execution, per-node settling, STATUS, and ARRIVED sequencing.
+- `src/PhysicalFleetExecutor.cpp`: strict LINE/point-turn waypoint execution, per-node settling, STATUS, ARRIVED sequencing, and a bounded eight-primitive node-correction session.
 - `src/StraightCalibrationMain.cpp`: isolated BOOT-gated, one-shot 30 cm encoder-speed data capture with post-stop CSV output.
 - `src/TurnCalibrationMain.cpp`: isolated BOOT-gated, one-shot 176-count CW/CCW point-turn capture with post-stop output.
 - `src/MotorChannelDiagnosticMain.cpp`: isolated manual encoder mapper and compile-selected, single-channel 300 ms raised-wheel pulse diagnostic.

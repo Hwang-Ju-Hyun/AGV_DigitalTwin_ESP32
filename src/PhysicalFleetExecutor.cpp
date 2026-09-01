@@ -385,8 +385,17 @@ void PhysicalFleetExecutor::update(uint32_t nowMs, bool sessionReady)
         && !correctionMotion)
         return;
 
+    const int32_t correctionElapsedMs = correctionMotion
+        ? static_cast<int32_t>(nowMs - m_CorrectionStartedMs)
+        : 0;
+    if (correctionMotion && correctionElapsedMs < 0)
+    {
+        // A callback may have started the primitive after the caller sampled
+        // nowMs. Do not pass that stale time into MotionController either.
+        return;
+    }
     if (correctionMotion
-        && nowMs - m_CorrectionStartedMs
+        && static_cast<uint32_t>(correctionElapsedMs)
                >= AppConfig::kCorrectionPrimitiveTimeoutMs)
     {
         stageActiveCorrectionFault(kDetailCorrectionTimeout);

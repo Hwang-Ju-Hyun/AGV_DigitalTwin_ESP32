@@ -1,4 +1,5 @@
 #include "PhysicalFleetExecutor.hpp"
+#include "Config.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -388,6 +389,54 @@ namespace
         assert(motion.outputsSafe());
     }
 
+    void testEightPrimitiveRecoveryBudgetAndNinthRejection()
+    {
+        resetFake();
+        MotionController motion;
+        PhysicalFleetExecutor executor(motion);
+        executor.begin(1, 0.0f);
+        enterNodeWait(executor, 26, 1, 2);
+
+        static_assert(
+            AppConfig::kMaximumCorrectionPrimitivesPerNode == 8,
+            "Server and ESP32 correction budgets must stay aligned");
+        for (uint32_t commandID = 1;
+             commandID <= AppConfig::kMaximumCorrectionPrimitivesPerNode;
+             ++commandID)
+        {
+            const auto command = correction(
+                26,
+                2,
+                commandID,
+                RobotProtocol::NodeCorrectionAction::TURN_CW,
+                0.1f);
+            assert(executor.acceptNodeCorrection(
+                       command, true, 300 + commandID * 10)
+                   == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
+            const auto report = completeCorrection(
+                executor, 301 + commandID * 10);
+            assert(report.commandID == commandID);
+        }
+
+        const size_t acceptedStarts = g_Fake.starts.size();
+        const auto ninth = correction(
+            26,
+            2,
+            9,
+            RobotProtocol::NodeCorrectionAction::TURN_CW,
+            0.1f);
+        assert(executor.acceptNodeCorrection(ninth, true, 400)
+               == PhysicalFleetExecutor::CorrectionAcceptResult::
+                      REJECTED_INVALID);
+        assert(g_Fake.starts.size() == acceptedStarts);
+
+        RobotProtocol::NodeCorrectionReportPayload report;
+        assert(executor.correctionReportPending(report));
+        assert(report.commandID == 9);
+        assert(report.result == RobotProtocol::NodeCorrectionResult::REJECTED);
+        assert(motion.outputsSafe());
+    }
+
     void testCorrectionDeadlineStopsAndReportsFault()
     {
         resetFake();
@@ -417,6 +466,34 @@ namespace
         assert(report.commandID == 1);
         assert(report.result == RobotProtocol::NodeCorrectionResult::FAULT);
         assert(report.detail != 0);
+    }
+
+    void testStaleLoopTimestampCannotInstantlyTimeoutCorrection()
+    {
+        resetFake();
+        MotionController motion;
+        PhysicalFleetExecutor executor(motion);
+        executor.begin(1, 0.0f);
+        enterNodeWait(executor, 31, 1, 2);
+
+        const auto turn = correction(
+            31, 2, 1, RobotProtocol::NodeCorrectionAction::TURN_CW, 0.2f);
+        assert(executor.acceptNodeCorrection(turn, true, 1001)
+               == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
+
+        // RobotClient callbacks can start a command after the loop captured
+        // its timestamp. This one-millisecond skew must not look like a
+        // wrapped multi-day elapsed interval.
+        executor.update(1000, true);
+        assert(executor.state()
+               == PhysicalFleetExecutor::State::CORRECTION_RUNNING);
+        RobotProtocol::NodeCorrectionReportPayload report;
+        assert(!executor.correctionReportPending(report));
+
+        executor.update(1001, true);
+        assert(executor.state()
+               == PhysicalFleetExecutor::State::CORRECTION_RUNNING);
+        assert(!executor.correctionReportPending(report));
     }
 
     void testEmergencyStopAndCancelAreSafe()
@@ -652,7 +729,9 @@ int main()
     testRotateDriveFinalRotateSequenceAndNoReportReplay();
     testCorrectionBoundsAndIdentity();
     testConflictingDuplicateCannotCreateSecondReport();
+    testEightPrimitiveRecoveryBudgetAndNinthRejection();
     testCorrectionDeadlineStopsAndReportsFault();
+    testStaleLoopTimestampCannotInstantlyTimeoutCorrection();
     testEmergencyStopAndCancelAreSafe();
     testCorrectionCancelAndNetworkLossCannotResumeOrReplay();
     testFailedReportAttemptIsNotRetried();

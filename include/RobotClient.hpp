@@ -51,6 +51,7 @@ public:
 private:
     void connectIfNeeded(uint32_t nowMs);
     void dropConnection(const char* reason);
+    void flushOutgoing(uint32_t nowMs);
     void readIncoming();
     void processFrames();
     void handleBody(const uint8_t* body, size_t length);
@@ -71,4 +72,7 @@ private:
     bool m_SocketActive = false;
     WiFiClient m_Client;
     std::vector<uint8_t> m_RxBuffer;
+    std::vector<uint8_t> m_TxBuffer;
+    size_t m_TxOffset = 0;
+    uint32_t m_TxBlockedSinceMs = 0;
 };
