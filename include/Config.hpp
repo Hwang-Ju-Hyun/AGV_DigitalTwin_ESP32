@@ -89,7 +89,7 @@ namespace AppConfig
     static constexpr const char* kWifiPassword = LocalSecrets::kWifiPassword;
 
     // Recheck this with ipconfig if the PC reconnects to Wi-Fi.
-    static constexpr char kServerHost[] = "192.168.45.226";
+    static constexpr char kServerHost[] = "192.168.45.102";
     static constexpr uint16_t kServerPort = 16666;
     static constexpr uint32_t kRequestedAgvID = 1;
 
