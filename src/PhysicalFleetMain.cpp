@@ -172,6 +172,29 @@ namespace
         {
             const auto result = fleetExecutor.acceptTrajectory(
                 trajectory, sessionReady(), millis());
+            if (result
+                == PhysicalFleetExecutor::AcceptResult::REJECTED_INVALID)
+            {
+                if (trajectory.waypointCount > 0)
+                {
+                    Serial.printf(
+                        "[FLEET] INVALID_COMMAND startNode=%lu currentNode=%lu "
+                        "startHeading=%.6f rad\n",
+                        static_cast<unsigned long>(trajectory.startNodeID),
+                        static_cast<unsigned long>(
+                            fleetExecutor.currentNodeID()),
+                        trajectory.waypoints[0].headingRad);
+                }
+                else
+                {
+                    Serial.printf(
+                        "[FLEET] INVALID_COMMAND startNode=%lu currentNode=%lu "
+                        "startHeading=unavailable\n",
+                        static_cast<unsigned long>(trajectory.startNodeID),
+                        static_cast<unsigned long>(
+                            fleetExecutor.currentNodeID()));
+                }
+            }
             Serial.printf(
                 "[FLEET] trajectory routeID=%lu start=%lu final=%lu "
                 "waypoints=%u scale=%.2f result=%s\n",
@@ -246,13 +269,15 @@ namespace
         const MotionController::Snapshot motion = motionController.snapshot();
         Serial.printf(
             "[STATUS] node=%lu target=%lu progress=%.3f state=%s "
-            "L=%ld R=%ld PWM=%d/%d STBY=%s\n",
+            "L=%ld/%ld R=%ld/%ld PWM=%d/%d STBY=%s\n",
             static_cast<unsigned long>(status.currentNodeID),
             static_cast<unsigned long>(status.currentLinkID),
             status.progress,
             PhysicalFleetExecutor::stateName(fleetExecutor.state()),
             static_cast<long>(motion.leftProgress),
+            static_cast<long>(motion.leftTargetCount),
             static_cast<long>(motion.rightProgress),
+            static_cast<long>(motion.rightTargetCount),
             motion.leftPwm,
             motion.rightPwm,
             digitalRead(AppConfig::kMotorStandbyPin) == LOW ? "LOW" : "HIGH");

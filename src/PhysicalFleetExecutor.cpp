@@ -11,7 +11,12 @@ namespace
     constexpr float kPi = 3.14159265358979323846f;
     constexpr float kHalfPi = kPi * 0.5f;
     constexpr float kPositionToleranceMm = 1.0f;
-    constexpr float kHeadingToleranceRad = 0.08f;
+    // Shared Server/ESP32 physical-fleet contract: corrected node headings
+    // and nominal LINE/quarter-turn trajectory headings may differ by 10 deg.
+    constexpr float kPhysicalFleetHeadingToleranceRad = 0.174532925f;
+    // Preserve the exact 10-degree boundary across float serialization and
+    // atan2/subtraction rounding without materially widening the contract.
+    constexpr float kHeadingComparisonEpsilonRad = 1.0e-6f;
     constexpr float kScaleTolerance = 0.01f;
     constexpr float kMinimumDriveMm = 10.0f;
     constexpr float kMaximumDriveMm = 500.0f;
@@ -45,6 +50,20 @@ namespace
     bool near(float lhs, float rhs, float tolerance)
     {
         return std::fabs(lhs - rhs) <= tolerance;
+    }
+
+    bool headingWithinTolerance(float normalizedHeadingErrorRad)
+    {
+        return std::fabs(normalizedHeadingErrorRad)
+            <= kPhysicalFleetHeadingToleranceRad
+                 + kHeadingComparisonEpsilonRad;
+    }
+
+    float turnCountsPerRadian(MotionController::Mode mode)
+    {
+        return mode == MotionController::Mode::TURN_CW
+            ? AppConfig::kTurnCwCountsPerRadian
+            : AppConfig::kTurnCcwCountsPerRadian;
     }
 }
 
@@ -290,12 +309,15 @@ PhysicalFleetExecutor::acceptNodeCorrection(
         m_ActiveCorrectionHeadingDeltaRad = clockwise
             ? -command.magnitude : command.magnitude;
         targetCounts = static_cast<int32_t>(std::lround(
-            command.magnitude * AppConfig::kTurnCountsPerRadian));
+            command.magnitude * turnCountsPerRadian(mode)));
     }
     m_MotionMode = mode;
 
     const MotionController::StartResult startResult =
-        m_Motion.startMotion(mode, targetCounts, nowMs);
+        m_Motion.startMotion(mode,
+                             targetCounts,
+                             nowMs,
+                             MotionController::Profile::CORRECTION);
     if (startResult == MotionController::StartResult::OUTPUT_DISABLED)
     {
         stageCorrectionReport(
@@ -504,7 +526,10 @@ void PhysicalFleetExecutor::startCurrentWaypoint(uint32_t nowMs)
     m_MotionMode = MotionController::Mode::FORWARD;
     m_TargetNodeID = waypoint.nodeID;
     const MotionController::StartResult result =
-        m_Motion.startMotion(m_MotionMode, targetCounts, nowMs);
+        m_Motion.startMotion(m_MotionMode,
+                             targetCounts,
+                             nowMs,
+                             MotionController::Profile::PHYSICAL_FLEET);
     if (result == MotionController::StartResult::OUTPUT_DISABLED)
     {
         m_State = State::OUTPUT_LOCKED;
@@ -534,9 +559,12 @@ void PhysicalFleetExecutor::startTurnQuarter(uint32_t nowMs)
         ? MotionController::Mode::TURN_CW
         : MotionController::Mode::TURN_CCW;
     const int32_t targetCounts = static_cast<int32_t>(
-        std::lround(kHalfPi * AppConfig::kTurnCountsPerRadian));
+        std::lround(kHalfPi * turnCountsPerRadian(m_MotionMode)));
     const MotionController::StartResult result =
-        m_Motion.startMotion(m_MotionMode, targetCounts, nowMs);
+        m_Motion.startMotion(m_MotionMode,
+                             targetCounts,
+                             nowMs,
+                             MotionController::Profile::PHYSICAL_FLEET);
     if (result == MotionController::StartResult::OUTPUT_DISABLED)
     {
         m_State = State::OUTPUT_LOCKED;
@@ -807,7 +835,7 @@ bool PhysicalFleetExecutor::validateCommand(
     const RobotProtocol::TrajectoryWaypoint& first = command.waypoints[0];
     if (!finiteWaypoint(first)
         || std::hypot(first.forwardMm, first.leftMm) > kPositionToleranceMm
-        || std::fabs(normalizeAngle(first.headingRad)) > kHeadingToleranceRad
+        || !headingWithinTolerance(normalizeAngle(first.headingRad))
         || first.nodeID != command.startNodeID
         || !hasFlag(first, RobotProtocol::TRAJECTORY_FLAG_NODE_BOUNDARY)
         || hasFlag(first, RobotProtocol::TRAJECTORY_FLAG_FINAL))
@@ -848,7 +876,7 @@ bool PhysicalFleetExecutor::validateCommand(
             const float delta = normalizeAngle(waypoint.headingRad - currentHeading);
             const int quarters = static_cast<int>(std::lround(delta / kHalfPi));
             if (quarters == 0 || std::abs(quarters) > 2
-                || std::fabs(delta - quarters * kHalfPi) > kHeadingToleranceRad)
+                || !headingWithinTolerance(delta - quarters * kHalfPi))
             {
                 return false;
             }
@@ -873,10 +901,10 @@ bool PhysicalFleetExecutor::validateCommand(
         const float distance = std::hypot(deltaForward, deltaLeft);
         const float pathHeading = std::atan2(deltaLeft, deltaForward);
         if (distance < kMinimumDriveMm || distance > kMaximumDriveMm
-            || std::fabs(normalizeAngle(pathHeading - currentHeading))
-                   > kHeadingToleranceRad
-            || std::fabs(normalizeAngle(waypoint.headingRad - currentHeading))
-                   > kHeadingToleranceRad)
+            || !headingWithinTolerance(
+                normalizeAngle(pathHeading - currentHeading))
+            || !headingWithinTolerance(
+                normalizeAngle(waypoint.headingRad - currentHeading)))
         {
             return false;
         }

@@ -3,6 +3,7 @@
 #include "Config.hpp"
 
 #include <climits>
+#include <cmath>
 
 namespace
 {
@@ -17,6 +18,18 @@ namespace
     constexpr int kForwardMaxPwm = 100;
     constexpr float kForwardSyncKp = 0.25f;
     constexpr int kForwardSyncCorrectionLimit = 15;
+
+    // Correction primitives trade travel time for lower overshoot. Minimum
+    // PWM stays at the existing proven floor; only start/cruise ceilings and
+    // ramp distances are reduced.
+    constexpr int kCorrectionForwardLeftStartPwm = 46;
+    constexpr int kCorrectionForwardRightStartPwm = 51;
+    constexpr int kCorrectionForwardLeftCruisePwm = 62;
+    constexpr int kCorrectionForwardRightCruisePwm = 67;
+    constexpr int32_t kCorrectionForwardAccelCounts = 45;
+    constexpr int32_t kCorrectionForwardDecelCounts = 70;
+    constexpr int kCorrectionForwardMaxPwm = 75;
+    constexpr int kCorrectionForwardSyncCorrectionLimit = 10;
 
     // Turn PWM values are preserved from the physically verified L-route.
     // Direction pins below use the Server convention: positive heading is a
@@ -33,6 +46,15 @@ namespace
     constexpr int kTurnMaxPwm = 90;
     constexpr float kTurnSyncKp = 0.20f;
     constexpr int kTurnSyncCorrectionLimit = 12;
+
+    constexpr int kCorrectionTurnLeftCruisePwm = 52;
+    constexpr int kCorrectionTurnRightCruisePwm = 57;
+    constexpr int kCorrectionTurnLeftMidPwm = 48;
+    constexpr int kCorrectionTurnRightMidPwm = 53;
+    constexpr int kCorrectionTurnLeftSlowPwm = 44;
+    constexpr int kCorrectionTurnRightSlowPwm = 49;
+    constexpr int kCorrectionTurnMaxPwm = 65;
+    constexpr int kCorrectionTurnSyncCorrectionLimit = 10;
 
     constexpr int32_t kWrongDirectionLimit = -10;
     constexpr int32_t kForwardCountOverrunAllowance = 100;
@@ -92,8 +114,12 @@ namespace
                                 : kForwardMotionTimeoutMs;
     }
 
-    int maximumPwm(MotionController::Mode mode)
+    int maximumPwm(MotionController::Mode mode,
+                   MotionController::Profile profile)
     {
+        if (profile == MotionController::Profile::CORRECTION)
+            return isTurnMode(mode) ? kCorrectionTurnMaxPwm
+                                    : kCorrectionForwardMaxPwm;
         return isTurnMode(mode) ? kTurnMaxPwm : kForwardMaxPwm;
     }
 }
@@ -264,12 +290,29 @@ MotionController::StartResult MotionController::startForward(int32_t targetCount
 MotionController::StartResult MotionController::startMotion(Mode mode,
                                                             int32_t targetCount)
 {
-    return startMotion(mode, targetCount, millis());
+    return startMotion(mode, targetCount, millis(), Profile::NORMAL);
 }
 
 MotionController::StartResult MotionController::startMotion(Mode mode,
                                                             int32_t targetCount,
                                                             uint32_t nowMs)
+{
+    return startMotion(mode, targetCount, nowMs, Profile::NORMAL);
+}
+
+MotionController::StartResult MotionController::startMotion(
+    Mode mode,
+    int32_t targetCount,
+    Profile profile)
+{
+    return startMotion(mode, targetCount, millis(), profile);
+}
+
+MotionController::StartResult MotionController::startMotion(
+    Mode mode,
+    int32_t targetCount,
+    uint32_t nowMs,
+    Profile profile)
 {
     if (!m_Initialized)
         return StartResult::NOT_READY;
@@ -296,6 +339,27 @@ MotionController::StartResult MotionController::startMotion(Mode mode,
         return StartResult::INVALID_TARGET;
     }
 
+    const bool applyFleetForwardTrim = mode == Mode::FORWARD
+        && profile != Profile::NORMAL;
+    const int64_t leftTargetCount = applyFleetForwardTrim
+        ? static_cast<int64_t>(std::llround(
+            static_cast<double>(targetCount)
+            * AppConfig::kForwardLeftTargetScale))
+        : targetCount;
+    const int64_t rightTargetCount = applyFleetForwardTrim
+        ? static_cast<int64_t>(std::llround(
+            static_cast<double>(targetCount)
+            * AppConfig::kForwardRightTargetScale))
+        : targetCount;
+    const int32_t overrunAllowance = countOverrunAllowance(mode);
+    if (leftTargetCount <= 0 || rightTargetCount <= 0
+        || leftTargetCount > INT32_MAX - overrunAllowance
+        || rightTargetCount > INT32_MAX - overrunAllowance)
+    {
+        forceSafeOutputs();
+        return StartResult::INVALID_TARGET;
+    }
+
     // This branch is deliberately before all HIGH/non-zero output commands.
     // With the current Phase 2A compile lock, start is a safe no-op.
     if (!AppConfig::kEnableMotorOutputs)
@@ -307,7 +371,10 @@ MotionController::StartResult MotionController::startMotion(Mode mode,
     forceSafeOutputs();
     resetEncoderCounts();
     m_Mode = mode;
+    m_Profile = profile;
     m_TargetCount = targetCount;
+    m_LeftTargetCount = static_cast<int32_t>(leftTargetCount);
+    m_RightTargetCount = static_cast<int32_t>(rightTargetCount);
     m_MotionStartedMs = nowMs;
     m_FinalElapsedMs = 0;
     m_SettlingStartedMs = 0;
@@ -326,9 +393,42 @@ MotionController::StartResult MotionController::startMotion(Mode mode,
     m_State = State::RUNNING;
 
     if (mode == Mode::FORWARD)
-        applyMotionOutputs(mode, kForwardLeftStartPwm, kForwardRightStartPwm);
+    {
+        if (profile == Profile::CORRECTION)
+        {
+            applyMotionOutputs(mode,
+                               kCorrectionForwardLeftStartPwm,
+                               kCorrectionForwardRightStartPwm);
+        }
+        else
+            applyMotionOutputs(mode, kForwardLeftStartPwm, kForwardRightStartPwm);
+    }
     else
-        applyMotionOutputs(mode, kTurnLeftCruisePwm, kTurnRightCruisePwm);
+    {
+        if (profile == Profile::CORRECTION)
+        {
+            if (targetCount > kTurnCruiseRemainingCounts)
+            {
+                applyMotionOutputs(mode,
+                                   kCorrectionTurnLeftCruisePwm,
+                                   kCorrectionTurnRightCruisePwm);
+            }
+            else if (targetCount > kTurnMidRemainingCounts)
+            {
+                applyMotionOutputs(mode,
+                                   kCorrectionTurnLeftMidPwm,
+                                   kCorrectionTurnRightMidPwm);
+            }
+            else
+            {
+                applyMotionOutputs(mode,
+                                   kCorrectionTurnLeftSlowPwm,
+                                   kCorrectionTurnRightSlowPwm);
+            }
+        }
+        else
+            applyMotionOutputs(mode, kTurnLeftCruisePwm, kTurnRightCruisePwm);
+    }
     return StartResult::STARTED;
 }
 
@@ -373,7 +473,8 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
                     leftCount,
                     rightCount);
 
-    if (leftCount >= m_TargetCount && rightCount >= m_TargetCount)
+    if (leftCount >= m_LeftTargetCount
+        && rightCount >= m_RightTargetCount)
     {
         // Remove drive power on the same control-loop sample that observes
         // both targets. Encoder stability is verified afterwards without a
@@ -396,8 +497,8 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
         return latchFault(Fault::WRONG_DIRECTION, nowMs);
 
     const int32_t overrunAllowance = countOverrunAllowance(m_Mode);
-    if (leftCount > m_TargetCount + overrunAllowance
-        || rightCount > m_TargetCount + overrunAllowance)
+    if (leftCount > m_LeftTargetCount + overrunAllowance
+        || rightCount > m_RightTargetCount + overrunAllowance)
     {
         return latchFault(Fault::COUNT_OVERRUN, nowMs);
     }
@@ -419,12 +520,14 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
         const int32_t leftAdvance = leftCount - m_LastProgressLeft;
         const int32_t rightAdvance = rightCount - m_LastProgressRight;
 
-        if (leftCount < m_TargetCount && leftAdvance < kMinimumWindowAdvance)
+        if (leftCount < m_LeftTargetCount
+            && leftAdvance < kMinimumWindowAdvance)
             ++m_LeftNoProgressWindows;
         else
             m_LeftNoProgressWindows = 0;
 
-        if (rightCount < m_TargetCount && rightAdvance < kMinimumWindowAdvance)
+        if (rightCount < m_RightTargetCount
+            && rightAdvance < kMinimumWindowAdvance)
             ++m_RightNoProgressWindows;
         else
             m_RightNoProgressWindows = 0;
@@ -450,32 +553,54 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
     if (m_Mode == Mode::FORWARD)
     {
         int32_t slowerProgress = leftCount < rightCount ? leftCount : rightCount;
-        const int32_t leadingProgress = leftCount > rightCount ? leftCount : rightCount;
         if (slowerProgress < 0)
             slowerProgress = 0;
 
-        int32_t remaining = m_TargetCount - leadingProgress;
-        if (remaining < 0)
-            remaining = 0;
+        int32_t leftRemaining = m_LeftTargetCount - leftCount;
+        int32_t rightRemaining = m_RightTargetCount - rightCount;
+        if (leftRemaining < 0)
+            leftRemaining = 0;
+        if (rightRemaining < 0)
+            rightRemaining = 0;
+        const int32_t remaining = leftRemaining < rightRemaining
+            ? leftRemaining : rightRemaining;
+
+        const bool correctionProfile =
+            m_Profile == Profile::CORRECTION;
+        const int32_t accelCounts = correctionProfile
+            ? kCorrectionForwardAccelCounts : kForwardAccelCounts;
+        const int32_t decelCounts = correctionProfile
+            ? kCorrectionForwardDecelCounts : kForwardDecelCounts;
+        const int leftStartPwm = correctionProfile
+            ? kCorrectionForwardLeftStartPwm : kForwardLeftStartPwm;
+        const int rightStartPwm = correctionProfile
+            ? kCorrectionForwardRightStartPwm : kForwardRightStartPwm;
+        const int leftCruisePwm = correctionProfile
+            ? kCorrectionForwardLeftCruisePwm : kForwardLeftCruisePwm;
+        const int rightCruisePwm = correctionProfile
+            ? kCorrectionForwardRightCruisePwm : kForwardRightCruisePwm;
 
         const float accelRatio = clampUnit(
             static_cast<float>(slowerProgress)
-            / static_cast<float>(kForwardAccelCounts));
+            / static_cast<float>(accelCounts));
         const float decelRatio = clampUnit(
             static_cast<float>(remaining)
-            / static_cast<float>(kForwardDecelCounts));
+            / static_cast<float>(decelCounts));
         const float motionRatio = accelRatio < decelRatio ? accelRatio : decelRatio;
 
-        baseLeftPwm = kForwardLeftStartPwm
-            + static_cast<int>((kForwardLeftCruisePwm - kForwardLeftStartPwm)
+        baseLeftPwm = leftStartPwm
+            + static_cast<int>((leftCruisePwm - leftStartPwm)
                                * motionRatio);
-        baseRightPwm = kForwardRightStartPwm
-            + static_cast<int>((kForwardRightCruisePwm - kForwardRightStartPwm)
+        baseRightPwm = rightStartPwm
+            + static_cast<int>((rightCruisePwm - rightStartPwm)
                                * motionRatio);
         minimumPwm = kForwardMinPwm;
-        maximumPwmValue = kForwardMaxPwm;
+        maximumPwmValue = correctionProfile
+            ? kCorrectionForwardMaxPwm : kForwardMaxPwm;
         syncKp = kForwardSyncKp;
-        correctionLimit = kForwardSyncCorrectionLimit;
+        correctionLimit = correctionProfile
+            ? kCorrectionForwardSyncCorrectionLimit
+            : kForwardSyncCorrectionLimit;
     }
     else
     {
@@ -483,26 +608,37 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
             (static_cast<int64_t>(leftCount) + static_cast<int64_t>(rightCount)) / 2);
         const int32_t remaining = m_TargetCount - averageProgress;
 
+        const bool correctionProfile =
+            m_Profile == Profile::CORRECTION;
         if (remaining > kTurnCruiseRemainingCounts)
         {
-            baseLeftPwm = kTurnLeftCruisePwm;
-            baseRightPwm = kTurnRightCruisePwm;
+            baseLeftPwm = correctionProfile
+                ? kCorrectionTurnLeftCruisePwm : kTurnLeftCruisePwm;
+            baseRightPwm = correctionProfile
+                ? kCorrectionTurnRightCruisePwm : kTurnRightCruisePwm;
         }
         else if (remaining > kTurnMidRemainingCounts)
         {
-            baseLeftPwm = kTurnLeftMidPwm;
-            baseRightPwm = kTurnRightMidPwm;
+            baseLeftPwm = correctionProfile
+                ? kCorrectionTurnLeftMidPwm : kTurnLeftMidPwm;
+            baseRightPwm = correctionProfile
+                ? kCorrectionTurnRightMidPwm : kTurnRightMidPwm;
         }
         else
         {
-            baseLeftPwm = kTurnLeftSlowPwm;
-            baseRightPwm = kTurnRightSlowPwm;
+            baseLeftPwm = correctionProfile
+                ? kCorrectionTurnLeftSlowPwm : kTurnLeftSlowPwm;
+            baseRightPwm = correctionProfile
+                ? kCorrectionTurnRightSlowPwm : kTurnRightSlowPwm;
         }
 
         minimumPwm = kTurnMinPwm;
-        maximumPwmValue = kTurnMaxPwm;
+        maximumPwmValue = correctionProfile
+            ? kCorrectionTurnMaxPwm : kTurnMaxPwm;
         syncKp = kTurnSyncKp;
-        correctionLimit = kTurnSyncCorrectionLimit;
+        correctionLimit = correctionProfile
+            ? kCorrectionTurnSyncCorrectionLimit
+            : kTurnSyncCorrectionLimit;
     }
 
     const int32_t syncError = leftCount - rightCount;
@@ -512,10 +648,10 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
 
     int leftPwm = baseLeftPwm - correction;
     int rightPwm = baseRightPwm + correction;
-    leftPwm = leftCount >= m_TargetCount
+    leftPwm = leftCount >= m_LeftTargetCount
         ? 0
         : clampInt(leftPwm, minimumPwm, maximumPwmValue);
-    rightPwm = rightCount >= m_TargetCount
+    rightPwm = rightCount >= m_RightTargetCount
         ? 0
         : clampInt(rightPwm, minimumPwm, maximumPwmValue);
 
@@ -548,8 +684,8 @@ MotionController::UpdateResult MotionController::updateSettling(uint32_t nowMs)
         return latchFault(Fault::WRONG_DIRECTION, nowMs);
 
     const int32_t overrunAllowance = countOverrunAllowance(m_Mode);
-    if (leftCount > m_TargetCount + overrunAllowance
-        || rightCount > m_TargetCount + overrunAllowance)
+    if (leftCount > m_LeftTargetCount + overrunAllowance
+        || rightCount > m_RightTargetCount + overrunAllowance)
     {
         return latchFault(Fault::COUNT_OVERRUN, nowMs);
     }
@@ -577,8 +713,8 @@ MotionController::UpdateResult MotionController::updateSettling(uint32_t nowMs)
     if (nowMs - m_SettlingStartedMs >= AppConfig::kEncoderSettleTimeoutMs)
         return latchFault(Fault::SETTLING_TIMEOUT, nowMs);
 
-    if (leftCount >= m_TargetCount
-        && rightCount >= m_TargetCount
+    if (leftCount >= m_LeftTargetCount
+        && rightCount >= m_RightTargetCount
         && nowMs - m_SettlingStableSinceMs
                >= AppConfig::kEncoderSettleStableMs)
     {
@@ -629,6 +765,8 @@ MotionController::Snapshot MotionController::snapshot() const
                     result.leftProgress,
                     result.rightProgress);
     result.targetCount = m_TargetCount;
+    result.leftTargetCount = m_LeftTargetCount;
+    result.rightTargetCount = m_RightTargetCount;
     result.leftPwm = m_LeftPwm;
     result.rightPwm = m_RightPwm;
     result.velocityCountsPerSecond = m_VelocityCountsPerSecond;
@@ -641,15 +779,19 @@ MotionController::Snapshot MotionController::snapshot() const
     result.completed = completed();
     result.faultLatched = faultLatched();
     result.outputsSafe = outputsSafe();
+    result.profile = m_Profile;
     result.fault = m_Fault;
 
-    if (m_TargetCount > 0)
+    if (m_LeftTargetCount > 0 && m_RightTargetCount > 0)
     {
         int32_t safeLeft = result.leftProgress < 0 ? 0 : result.leftProgress;
         int32_t safeRight = result.rightProgress < 0 ? 0 : result.rightProgress;
-        const int32_t slowerProgress = safeLeft < safeRight ? safeLeft : safeRight;
-        result.progress = clampUnit(
-            static_cast<float>(slowerProgress) / static_cast<float>(m_TargetCount));
+        const float leftRatio = static_cast<float>(safeLeft)
+                              / static_cast<float>(m_LeftTargetCount);
+        const float rightRatio = static_cast<float>(safeRight)
+                               / static_cast<float>(m_RightTargetCount);
+        result.progress = clampUnit(leftRatio < rightRatio
+                                        ? leftRatio : rightRatio);
     }
 
     return result;
@@ -725,7 +867,7 @@ void MotionController::applyMotionOutputs(Mode mode, int leftPwm, int rightPwm)
         return;
     }
 
-    const int pwmLimit = maximumPwm(mode);
+    const int pwmLimit = maximumPwm(mode, m_Profile);
     leftPwm = clampInt(leftPwm, 0, pwmLimit);
     rightPwm = clampInt(rightPwm, 0, pwmLimit);
 

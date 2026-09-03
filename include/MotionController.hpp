@@ -14,6 +14,13 @@ public:
         TURN_CCW
     };
 
+    enum class Profile : uint8_t
+    {
+        NORMAL,
+        PHYSICAL_FLEET,
+        CORRECTION
+    };
+
     enum class StartResult : uint8_t
     {
         STARTED,
@@ -58,6 +65,8 @@ public:
         int32_t leftProgress = 0;
         int32_t rightProgress = 0;
         int32_t targetCount = 0;
+        int32_t leftTargetCount = 0;
+        int32_t rightTargetCount = 0;
         int leftPwm = 0;
         int rightPwm = 0;
         float progress = 0.0f;
@@ -70,6 +79,7 @@ public:
         bool faultLatched = false;
         bool outputsSafe = false;
         Mode mode = Mode::NONE;
+        Profile profile = Profile::NORMAL;
         Fault fault = Fault::NONE;
     };
 
@@ -81,6 +91,13 @@ public:
     StartResult startForward(int32_t targetCount, uint32_t nowMs);
     StartResult startMotion(Mode mode, int32_t targetCount);
     StartResult startMotion(Mode mode, int32_t targetCount, uint32_t nowMs);
+    StartResult startMotion(Mode mode,
+                            int32_t targetCount,
+                            Profile profile);
+    StartResult startMotion(Mode mode,
+                            int32_t targetCount,
+                            uint32_t nowMs,
+                            Profile profile);
     UpdateResult update(uint32_t nowMs);
 
     // Intentional local/server cancellation removes power immediately without
@@ -139,8 +156,11 @@ private:
     State m_State = State::NOT_READY;
     Fault m_Fault = Fault::NONE;
     Mode m_Mode = Mode::NONE;
+    Profile m_Profile = Profile::NORMAL;
     bool m_Initialized = false;
     int32_t m_TargetCount = 0;
+    int32_t m_LeftTargetCount = 0;
+    int32_t m_RightTargetCount = 0;
     int m_LeftPwm = 0;
     int m_RightPwm = 0;
     uint32_t m_MotionStartedMs = 0;

@@ -89,7 +89,7 @@ namespace AppConfig
     static constexpr const char* kWifiPassword = LocalSecrets::kWifiPassword;
 
     // Recheck this with ipconfig if the PC reconnects to Wi-Fi.
-    static constexpr char kServerHost[] = "192.168.45.102";
+    static constexpr char kServerHost[] = "192.168.45.194";
     static constexpr uint16_t kServerPort = 16666;
     static constexpr uint32_t kRequestedAgvID = 1;
 
@@ -134,9 +134,21 @@ namespace AppConfig
     static constexpr float kPhysicalFleetScaleMmPerMapUnit = 50.0f;
     static constexpr float kPhysicalFleetCruiseSpeedMmPerSecond = 80.0f;
     static constexpr float kForwardCountsPerMm = 520.0f / 300.0f;
-    static constexpr float kTurnCountsPerRadian =
-        176.0f / 1.57079632679489661923f;
-    static constexpr int32_t kTurn90Count = 176;
+    // Provisional floor-log calibration. Forward distance stays on the
+    // verified nominal mean distance; a symmetric 5% target split counters
+    // the repeatable leftward arc seen on 350 mm edges.
+    static constexpr float kForwardLeftTargetScale = 1.025f;
+    static constexpr float kForwardRightTargetScale = 0.975f;
+    // Direction-specific 90-degree targets compensate the measured
+    // over-rotation of the former shared 176-count target.
+    static constexpr int32_t kTurn90CwCount = 163;
+    static constexpr int32_t kTurn90CcwCount = 159;
+    static constexpr float kTurnCwCountsPerRadian =
+        static_cast<float>(kTurn90CwCount)
+        / 1.57079632679489661923f;
+    static constexpr float kTurnCcwCountsPerRadian =
+        static_cast<float>(kTurn90CcwCount)
+        / 1.57079632679489661923f;
     static constexpr float kCorrectionMinimumDriveMm = 20.0f;
     static constexpr float kCorrectionMaximumDriveMm = 120.0f;
     static constexpr float kCorrectionMinimumTurnRad =

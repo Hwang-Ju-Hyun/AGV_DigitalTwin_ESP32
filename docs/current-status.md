@@ -1,6 +1,6 @@
 # ESP32Test Current Status
 
-Last reviewed: 2026-08-30
+Last reviewed: 2026-09-03
 
 ## Repository baseline
 
@@ -59,7 +59,7 @@ PlatformIO exposes fourteen explicit compile-time safety profiles:
 - `esp32dev-straight-calibration-locked` compiles the isolated one-shot straight test while keeping every motor output locked.
 - `esp32dev-straight-calibration` is the explicit network-free live calibration profile: BOOT plus five seconds permits one 520-count forward run, then a reboot is required.
 - `esp32dev-turn-calibration-locked` compiles the isolated quarter-turn test while keeping every motor output locked.
-- `esp32dev-turn-calibration-cw` and `esp32dev-turn-calibration-ccw` each permit one network-free 176-count point turn after BOOT plus five seconds, then require a reboot.
+- `esp32dev-turn-calibration-cw` and `esp32dev-turn-calibration-ccw` permit one network-free direction-specific 163-count CW or 159-count CCW point turn after BOOT plus five seconds, then require a reboot.
 - `esp32dev-channel-diagnostic-locked` is a USB-only manual encoder mapper with no reachable motor-output path.
 - `esp32dev-channel-diagnostic-a` and `esp32dev-channel-diagnostic-b` each allow one network-free, raised-wheel-only 300 ms pulse on only the selected TB6612 channel after BOOT plus five seconds. Both finish with PWM zero and `STBY=LOW` and require a reboot.
 - Missing, non-binary, or mismatched profile flags stop compilation. Profile-specific `static_assert` checks independently verify every locked or live build.
@@ -132,7 +132,7 @@ Server `df9d6410e325bd57ca4bc59f828e694ba7ff88a7` defines a 15-node/44-link LINE
 
 - requires local BOOT plus a five-second countdown before Wi-Fi/TCP is started;
 - advertises `CAPABILITY_TRAJECTORY_COMMAND` only in the explicit `esp32dev-physical-fleet` motor profile;
-- converts 50 mm/map-unit LINE endpoints to encoder-count forward moves and cardinal `ROTATE_IN_PLACE` markers to 176-count CW/CCW quarter turns;
+- converts 50 mm/map-unit LINE endpoints to encoder-count forward moves and cardinal `ROTATE_IN_PLACE` markers to direction-specific 163-count CW or 159-count CCW quarter turns;
 - stops and settles at every actual node, sends one local `ARRIVED` for that node, and never sends `ARRIVED` for the initial node or `nodeID=0` rotation markers;
 - continues the remaining waypoints and later Server jobs without another BOOT press;
 - treats every BOOT press after arming as a latched local E-stop, and stops before socket cleanup on a detected disconnect.
@@ -141,15 +141,30 @@ The BOOT approval also confirms that an operator placed the chassis at node 1 fa
 
 The default and `esp32dev-physical-fleet-locked` profiles keep motor output compile-locked. A crossed/intermittent drive-channel mapping was isolated and corrected before the latest straight tests. On 2026-08-30, the physical CW/CCW mode mapping was corrected after an east-facing AGV followed a Server CCW command toward the south; the user then confirmed the integrated Server/Vision/ESP32 run moved in the intended direction. Distance and turn-angle repeatability, 80 mm/s schedule matching, and indefinite automatic-fleet operation remain unverified.
 
-## Vision node-correction integration (build-only)
+Physical-fleet trajectory validation now uses the shared Server/ESP32 heading
+tolerance of 10 degrees (`0.174532925` rad) for the command start heading,
+straight LINE alignment, and nominal 90/180-degree rotate-in-place markers.
+Commands beyond that tolerance still latch `INVALID_COMMAND` before motion.
 
-The integration branch now adds bounded post-arrival correction primitives to the live physical-fleet profile. This path has not been uploaded or exercised on hardware.
+The 2026-09-03 floor-log tuning is deliberately scoped to physical-fleet
+motion. Its provisional values are 163 counts/CW quarter turn, 159 counts/CCW
+quarter turn, and symmetric forward targets of 102.5% left / 97.5% right.
+This preserves the nominal mean distance while making the right target about
+4.9% earlier than the left. The legacy exact-route and isolated straight-calibration profiles keep
+their original equal forward targets. These values were derived from repeated
+over-rotation and leftward-arc observations and still require controlled
+physical repeatability checks.
+
+## Vision node-correction integration (physically exercised; tuning ongoing)
+
+The integration branch adds bounded post-arrival correction primitives to the live physical-fleet profile. A later physical run traversed nodes `6 -> 11 -> 6 -> 7 -> 8 -> 9 -> 10 -> 9 -> 8 -> 7 -> 6`; post-correction position error was generally about 4--33 mm. Pre-correction error was about 23--145 mm and typically required three to six correction primitives per node. The run eventually faulted with `WHEEL_MISMATCH` detail `65539` during a 120 mm correction drive while Vision also transitioned to `POSE_LOST`.
 
 - The live profile advertises `CAPABILITY_NODE_CORRECTION` together with trajectory execution; the locked profile advertises neither capability.
 - `NODE_CORRECTION_COMMAND=103` accepts only `DRIVE_FORWARD`, `TURN_CW`, or `TURN_CCW` after a final one-edge trajectory has sent `ARRIVED` and the executor is safely stopped in `NODE_WAIT`.
 - Every command is bound to the just-completed route ID and current node ID. Command IDs are monotonic and exact duplicates are idempotent.
-- A primitive is limited to 20--120 mm or 5--90 degrees, with at most six accepted primitives for one completed edge. Correction motion reuses the existing encoder settling, output-invariant, disconnect, BOOT E-stop, and motion-fault gates.
+- A primitive is limited to 20--120 mm or 5--90 degrees, with at most eight accepted primitives for one completed edge. Correction motion reuses the existing encoder settling, output-invariant, disconnect, BOOT E-stop, and motion-fault gates.
 - `NODE_CORRECTION_REPORT=202` returns `COMPLETED`, `REJECTED`, or `FAULT`. A correction turn updates the ESP32 status heading by the commanded signed angle; correction motion does not alter the completed node or the stored route-local forward/left coordinates. The firmware sends a fresh final `STATUS` before the report on the same TCP stream so the Server observes the corrected heading before planning the next edge.
+- Correction drive and turn primitives now select a dedicated lower-speed PWM profile. The established minimum PWM floors remain unchanged to avoid introducing an unmeasured stall threshold; start/cruise ceilings and correction ramp distances are reduced.
 - The matching Server integration must dispatch final one-edge trajectories, treat their normal `ARRIVED` as the coarse node-ready point, issue correction primitives from fresh verified Vision measurements, and dispatch the next edge only after correction completes or is unnecessary.
 
 ## Straight calibration diagnostics
@@ -158,7 +173,7 @@ The straight-calibration profiles do not use Wi-Fi, TCP, Server routes, STATUS, 
 
 The separate channel diagnostic does not use `MotionController`, straight synchronization, Server code, or credentials. Its locked build can map encoders by hand. After correction, channel A drove the physical left wheel forward and reported `L=65/R=0`; channel B drove the physical right wheel forward and reported `L=0/R=105`.
 
-The turn-calibration profiles reuse the guarded `MotionController` point-turn path but remain isolated from networking. They request one 176-count CW or CCW turn, settle with outputs safe, buffer raw and normalized encoder samples, print only after stop, and require reboot before another run.
+The turn-calibration profiles reuse the guarded `MotionController` point-turn path but remain isolated from networking. They request one direction-specific 163-count CW or 159-count CCW turn, settle with outputs safe, buffer raw and normalized encoder samples, print only after stop, and require reboot before another run.
 
 ## Firmware currently built
 
@@ -166,7 +181,7 @@ The active PlatformIO firmware is now split into these responsibilities:
 
 - `src/RobotProtocol.cpp`: RobotProtocol v1 field-by-field serialization.
 - `src/RobotClient.cpp`: Wi-Fi/TCP session, HELLO/ACK, packet handling, STATUS, ARRIVED, ERROR, and PING/PONG.
-- `src/MotionController.cpp`: encoder interrupts, the verified 30 cm forward profile, synchronization, immediate motion safety, and encoder-stability settling.
+- `src/MotionController.cpp`: encoder interrupts, the verified legacy 30 cm forward profile, physical-fleet-only wheel-target trim, correction-only low-speed profiles, synchronization, immediate motion safety, and encoder-stability settling.
 - `src/RouteExecutor.cpp`: exact-route validation, BOOT/countdown/E-stop gating, running/settling state, fault latch, progress STATUS, and ARRIVED gating.
 - `src/EncoderOdometry.cpp`: preview-only robot-local differential-drive odometry using an atomic encoder reset epoch.
 - `src/TrajectoryCommandStore.cpp`: non-driving trajectory validation, duplicate handling, and bounded storage.
@@ -174,7 +189,7 @@ The active PlatformIO firmware is now split into these responsibilities:
 - `src/PhysicalFleetAuthorization.cpp`: pre-network BOOT/countdown authorization and reboot-latched local E-stop state.
 - `src/PhysicalFleetExecutor.cpp`: strict LINE/point-turn waypoint execution, per-node settling, STATUS, ARRIVED sequencing, and a bounded eight-primitive node-correction session.
 - `src/StraightCalibrationMain.cpp`: isolated BOOT-gated, one-shot 30 cm encoder-speed data capture with post-stop CSV output.
-- `src/TurnCalibrationMain.cpp`: isolated BOOT-gated, one-shot 176-count CW/CCW point-turn capture with post-stop output.
+- `src/TurnCalibrationMain.cpp`: isolated BOOT-gated, one-shot direction-specific 163-count CW or 159-count CCW point-turn capture with post-stop output.
 - `src/MotorChannelDiagnosticMain.cpp`: isolated manual encoder mapper and compile-selected, single-channel 300 ms raised-wheel pulse diagnostic.
 - `src/main.cpp` and `src/PhysicalFleetMain.cpp`: profile-specific callback wiring and non-blocking safety/network loops.
 - `platformio.ini`: selects the default locked, preview/trace, legacy raised-wheel, TestCase0 fleet, or isolated straight/turn/channel diagnostic profiles.
@@ -237,6 +252,19 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 ## Build validation
 
+- On 2026-09-03, all five host tests passed. The new real-controller host test
+  verified physical-fleet left/right targets of 205/195 for a nominal 200,
+  unchanged legacy
+  targets of 100/100, lower correction start PWM, and preservation of the
+  80-count `WHEEL_MISMATCH` fault with safe outputs. All fourteen PlatformIO
+  profiles then built successfully without upload. The live physical-fleet
+  build used 47,340 bytes RAM and 785,281 bytes flash.
+
+- On 2026-09-02, all four host tests passed, including the physical-fleet
+  heading-contract regression and rejection boundaries. The
+  `esp32dev-physical-fleet` profile also built successfully without upload,
+  using 47,332 bytes RAM and 784,357 bytes flash.
+
 - On 2026-08-19, the authorization host assertions and all fourteen PlatformIO builds passed without upload. The new turn locked build used 27,944 bytes RAM / 282,297 bytes flash; each CW/CCW live build used 27,944 bytes RAM / 283,445 bytes flash.
 
 - On 2026-08-18, the default motor-locked environment and all three channel-diagnostic environments built successfully without upload. The locked diagnostic used 22,104 bytes RAM / 279,769 bytes flash; each A/B live diagnostic used 22,104 bytes RAM / 279,865 bytes flash.
@@ -275,8 +303,13 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 - Matching the Server's requested 80 mm/s; Phase 2F currently uses the existing empirical PWM profile rather than closed-loop metric speed control
 - Recovery/relocalization after a mid-edge stop or reboot, and accepted-but-half-open TCP detection
 - Physical 50 mm/map-unit calibration; Bezier execution remains intentionally excluded
-- Standalone 176-count CW/CCW results and measured floor angle; CCW still uses the shared, not-yet-physically-verified PWM profile
+- Repeatability of the provisional 163-count CW, 159-count CCW, symmetric
+  102.5%/97.5% forward-wheel
+  target, and correction-only lower-speed PWM values on the physical chassis
 
 ## Next safe step
 
-Repeat both isolated CW/CCW point turns and one fixed 350 mm edge with an operator beside the vehicle. Only after those repeatability checks should indefinite automatic-fleet operation resume.
+After explicit upload approval and the documented power/wiring isolation check,
+repeat both isolated CW/CCW point turns first, then one fixed 350 mm edge, and
+finally bounded correction primitives with an operator beside the vehicle.
+Only after those repeatability checks should automatic-fleet operation resume.

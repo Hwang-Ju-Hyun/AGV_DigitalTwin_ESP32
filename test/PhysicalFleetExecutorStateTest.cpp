@@ -8,14 +8,21 @@
 
 namespace
 {
+    constexpr float kPi = 3.14159265358979323846f;
     constexpr float kHalfPi = 1.57079632679489661923f;
     constexpr float kFloatTolerance = 1.0e-5f;
+
+    constexpr float radians(float degrees)
+    {
+        return degrees * kPi / 180.0f;
+    }
 
     struct StartCall
     {
         MotionController::Mode mode = MotionController::Mode::NONE;
         int32_t targetCount = 0;
         uint32_t nowMs = 0;
+        MotionController::Profile profile = MotionController::Profile::NORMAL;
     };
 
     struct FakeMotionControl
@@ -128,6 +135,8 @@ namespace
                == PhysicalFleetExecutor::AcceptResult::STORED);
         executor.update(10, true);
         assert(executor.state() == PhysicalFleetExecutor::State::RUNNING);
+        assert(g_Fake.starts.back().profile
+               == MotionController::Profile::PHYSICAL_FLEET);
         completeCurrentMotion(executor, 20);
 
         uint32_t arrivalNodeID = 0;
@@ -204,6 +213,124 @@ namespace
         assert(motion.outputsSafe());
     }
 
+    void testCorrectedNodeResidualHeadingWithinTenDegreesIsStored()
+    {
+        resetFake();
+        MotionController motion;
+        PhysicalFleetExecutor executor(motion);
+        executor.begin(3, 0.0f);
+
+        // Reproduces the Node 3 -> 4 command after Vision correction left a
+        // -5.7605 degree start-heading residual. The nominal edge is straight.
+        auto command = oneEdgeCommand(34, 3, 4, 350.0f);
+        command.waypoints[0].headingRad = radians(-5.7605f);
+
+        assert(executor.acceptTrajectory(command, true, 10)
+               == PhysicalFleetExecutor::AcceptResult::STORED);
+        assert(executor.state() == PhysicalFleetExecutor::State::READY);
+        assert(executor.hasActiveCommand());
+        assert(g_Fake.starts.empty());
+        assert(motion.outputsSafe());
+    }
+
+    void testStraightHeadingOverTenDegreesIsRejectedSafely()
+    {
+        resetFake();
+        MotionController motion;
+        PhysicalFleetExecutor executor(motion);
+        executor.begin(3, 0.0f);
+
+        const float rejectedHeading = radians(10.5f);
+        auto command = oneEdgeCommand(35, 3, 4, 350.0f);
+        command.waypoints[1].forwardMm =
+            350.0f * std::cos(rejectedHeading);
+        command.waypoints[1].leftMm =
+            350.0f * std::sin(rejectedHeading);
+
+        assert(executor.acceptTrajectory(command, true, 10)
+               == PhysicalFleetExecutor::AcceptResult::REJECTED_INVALID);
+        assert(executor.state()
+               == PhysicalFleetExecutor::State::FAULT_LATCHED);
+        assert(executor.fault()
+               == PhysicalFleetExecutor::Fault::INVALID_COMMAND);
+        assert(g_Fake.starts.empty());
+        assert(motion.outputsSafe());
+    }
+
+    void testRotateHeadingWithinTenDegreesIsStored()
+    {
+        for (const float nominalDegrees : {90.0f, 180.0f})
+        {
+            resetFake();
+            MotionController motion;
+            PhysicalFleetExecutor executor(motion);
+            executor.begin(3, 0.0f);
+
+            const float rotateHeading = radians(nominalDegrees + 10.0f);
+            auto command = oneEdgeCommand(36, 3, 4, 100.0f);
+            command.waypointCount = 3;
+            command.waypoints[1] = waypoint(
+                0.0f,
+                0.0f,
+                rotateHeading,
+                0.0f,
+                0,
+                RobotProtocol::TRAJECTORY_FLAG_ROTATE_IN_PLACE);
+            command.waypoints[2] = waypoint(
+                100.0f * std::cos(rotateHeading),
+                100.0f * std::sin(rotateHeading),
+                rotateHeading,
+                0.0f,
+                4,
+                flags(RobotProtocol::TRAJECTORY_FLAG_NODE_BOUNDARY,
+                      RobotProtocol::TRAJECTORY_FLAG_STOP,
+                      RobotProtocol::TRAJECTORY_FLAG_FINAL));
+
+            assert(executor.acceptTrajectory(command, true, 10)
+                   == PhysicalFleetExecutor::AcceptResult::STORED);
+            assert(executor.state() == PhysicalFleetExecutor::State::READY);
+            assert(g_Fake.starts.empty());
+            assert(motion.outputsSafe());
+        }
+    }
+
+    void testRotateHeadingOverTenDegreesIsRejectedSafely()
+    {
+        resetFake();
+        MotionController motion;
+        PhysicalFleetExecutor executor(motion);
+        executor.begin(3, 0.0f);
+
+        const float rotateHeading = radians(100.5f);
+        auto command = oneEdgeCommand(37, 3, 4, 100.0f);
+        command.waypointCount = 3;
+        command.waypoints[1] = waypoint(
+            0.0f,
+            0.0f,
+            rotateHeading,
+            0.0f,
+            0,
+            RobotProtocol::TRAJECTORY_FLAG_ROTATE_IN_PLACE);
+        command.waypoints[2] = waypoint(
+            100.0f * std::cos(rotateHeading),
+            100.0f * std::sin(rotateHeading),
+            rotateHeading,
+            0.0f,
+            4,
+            flags(RobotProtocol::TRAJECTORY_FLAG_NODE_BOUNDARY,
+                  RobotProtocol::TRAJECTORY_FLAG_STOP,
+                  RobotProtocol::TRAJECTORY_FLAG_FINAL));
+
+        assert(executor.acceptTrajectory(command, true, 10)
+               == PhysicalFleetExecutor::AcceptResult::REJECTED_INVALID);
+        assert(executor.state()
+               == PhysicalFleetExecutor::State::FAULT_LATCHED);
+        assert(executor.fault()
+               == PhysicalFleetExecutor::Fault::INVALID_COMMAND);
+        assert(g_Fake.starts.empty());
+        assert(motion.outputsSafe());
+    }
+
     void testOneEdgeMayContainRotationMarker()
     {
         resetFake();
@@ -234,6 +361,10 @@ namespace
                == PhysicalFleetExecutor::AcceptResult::STORED);
         executor.update(10, true);
         assert(g_Fake.starts.back().mode == MotionController::Mode::TURN_CCW);
+        assert(g_Fake.starts.back().targetCount
+               == AppConfig::kTurn90CcwCount);
+        assert(g_Fake.starts.back().profile
+               == MotionController::Profile::PHYSICAL_FLEET);
         completeCurrentMotion(executor, 20);
         assert(executor.state() == PhysicalFleetExecutor::State::SAFE_PAUSE);
         executor.update(519, true);
@@ -250,6 +381,42 @@ namespace
         assert(executor.state() == PhysicalFleetExecutor::State::NODE_WAIT);
     }
 
+    void testClockwiseOneEdgeUsesDirectionSpecificTarget()
+    {
+        resetFake();
+        MotionController motion;
+        PhysicalFleetExecutor executor(motion);
+        executor.begin(3, 0.0f);
+
+        auto command = oneEdgeCommand(38, 3, 4);
+        command.waypointCount = 3;
+        command.waypoints[1] = waypoint(
+            0.0f,
+            0.0f,
+            -kHalfPi,
+            0.0f,
+            0,
+            RobotProtocol::TRAJECTORY_FLAG_ROTATE_IN_PLACE);
+        command.waypoints[2] = waypoint(
+            0.0f,
+            -100.0f,
+            -kHalfPi,
+            0.0f,
+            4,
+            flags(RobotProtocol::TRAJECTORY_FLAG_NODE_BOUNDARY,
+                  RobotProtocol::TRAJECTORY_FLAG_STOP,
+                  RobotProtocol::TRAJECTORY_FLAG_FINAL));
+
+        assert(executor.acceptTrajectory(command, true, 10)
+               == PhysicalFleetExecutor::AcceptResult::STORED);
+        executor.update(10, true);
+        assert(g_Fake.starts.back().mode == MotionController::Mode::TURN_CW);
+        assert(g_Fake.starts.back().targetCount
+               == AppConfig::kTurn90CwCount);
+        assert(g_Fake.starts.back().profile
+               == MotionController::Profile::PHYSICAL_FLEET);
+    }
+
     void testRotateDriveFinalRotateSequenceAndNoReportReplay()
     {
         resetFake();
@@ -263,6 +430,11 @@ namespace
         assert(executor.acceptNodeCorrection(firstTurn, true, 100)
                == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
         assert(g_Fake.starts.back().mode == MotionController::Mode::TURN_CW);
+        assert(g_Fake.starts.back().targetCount
+               == static_cast<int32_t>(std::lround(
+                   0.2f * AppConfig::kTurnCwCountsPerRadian)));
+        assert(g_Fake.starts.back().profile
+               == MotionController::Profile::CORRECTION);
         auto report = completeCorrection(executor, 110);
         assert(report.commandID == 1);
 
@@ -275,6 +447,8 @@ namespace
         assert(executor.acceptNodeCorrection(drive, true, 120)
                == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
         assert(g_Fake.starts.back().mode == MotionController::Mode::FORWARD);
+        assert(g_Fake.starts.back().profile
+               == MotionController::Profile::CORRECTION);
         report = completeCorrection(executor, 130);
         assert(report.commandID == 2);
 
@@ -283,6 +457,11 @@ namespace
         assert(executor.acceptNodeCorrection(finalTurn, true, 140)
                == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
         assert(g_Fake.starts.back().mode == MotionController::Mode::TURN_CCW);
+        assert(g_Fake.starts.back().targetCount
+               == static_cast<int32_t>(std::lround(
+                   0.2f * AppConfig::kTurnCcwCountsPerRadian)));
+        assert(g_Fake.starts.back().profile
+               == MotionController::Profile::CORRECTION);
         report = completeCorrection(executor, 150);
         assert(report.commandID == 3);
         assert(std::fabs(executor.buildStatus().heading) < kFloatTolerance);
@@ -623,11 +802,23 @@ MotionController::StartResult MotionController::startMotion(
     int32_t targetCount,
     uint32_t nowMs)
 {
-    g_Fake.starts.push_back({mode, targetCount, nowMs});
+    return startMotion(mode, targetCount, nowMs, Profile::NORMAL);
+}
+
+MotionController::StartResult MotionController::startMotion(
+    Mode mode,
+    int32_t targetCount,
+    uint32_t nowMs,
+    Profile profile)
+{
+    g_Fake.starts.push_back({mode, targetCount, nowMs, profile});
     if (g_Fake.startResult != StartResult::STARTED)
         return g_Fake.startResult;
     m_Mode = mode;
+    m_Profile = profile;
     m_TargetCount = targetCount;
+    m_LeftTargetCount = targetCount;
+    m_RightTargetCount = targetCount;
     m_MotionStartedMs = nowMs;
     m_State = State::RUNNING;
     m_LeftPwm = 1;
@@ -692,6 +883,8 @@ MotionController::Snapshot MotionController::snapshot() const
 {
     Snapshot result;
     result.targetCount = m_TargetCount;
+    result.leftTargetCount = m_LeftTargetCount;
+    result.rightTargetCount = m_RightTargetCount;
     result.leftPwm = m_LeftPwm;
     result.rightPwm = m_RightPwm;
     result.elapsedMs = m_FinalElapsedMs;
@@ -701,6 +894,7 @@ MotionController::Snapshot MotionController::snapshot() const
     result.faultLatched = m_State == State::FAULTED;
     result.outputsSafe = outputsSafe();
     result.mode = m_Mode;
+    result.profile = m_Profile;
     result.fault = m_Fault;
     result.progress = result.completed ? 1.0f : 0.5f;
     return result;
@@ -725,7 +919,12 @@ int main()
 {
     testOneEdgeArrivalCannotAutoResume();
     testMultiEdgeTrajectoryIsRejected();
+    testCorrectedNodeResidualHeadingWithinTenDegreesIsStored();
+    testStraightHeadingOverTenDegreesIsRejectedSafely();
+    testRotateHeadingWithinTenDegreesIsStored();
+    testRotateHeadingOverTenDegreesIsRejectedSafely();
     testOneEdgeMayContainRotationMarker();
+    testClockwiseOneEdgeUsesDirectionSpecificTarget();
     testRotateDriveFinalRotateSequenceAndNoReportReplay();
     testCorrectionBoundsAndIdentity();
     testConflictingDuplicateCannotCreateSecondReport();

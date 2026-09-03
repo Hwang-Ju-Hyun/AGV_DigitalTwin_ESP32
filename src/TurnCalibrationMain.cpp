@@ -26,8 +26,10 @@ static_assert(AppConfig::kEnableMotorOutputs
 static_assert(AppConfig::kTurnCalibrationDirection == 1
                   || AppConfig::kTurnCalibrationDirection == 2,
               "TURN PROFILE FAILURE: direction must be CW=1 or CCW=2");
-static_assert(AppConfig::kTurn90Count == 176,
-              "TURN CALIBRATION FAILURE: verified target changed");
+static_assert(AppConfig::kTurn90CwCount == 163,
+              "TURN CALIBRATION FAILURE: CW target changed");
+static_assert(AppConfig::kTurn90CcwCount == 159,
+              "TURN CALIBRATION FAILURE: CCW target changed");
 
 namespace
 {
@@ -37,6 +39,8 @@ namespace
     constexpr MotionController::Mode kTurnMode =
         kClockwise ? MotionController::Mode::TURN_CW
                    : MotionController::Mode::TURN_CCW;
+    constexpr int32_t kTurnTargetCount = kClockwise
+        ? AppConfig::kTurn90CwCount : AppConfig::kTurn90CcwCount;
 
     enum class RunState : uint8_t
     {
@@ -187,7 +191,7 @@ namespace
 
         const MotionController::StartResult result =
             motionController.startMotion(
-                kTurnMode, AppConfig::kTurn90Count, nowMs);
+                kTurnMode, kTurnTargetCount, nowMs);
         if (result == MotionController::StartResult::STARTED)
         {
             runState = RunState::RUNNING;
