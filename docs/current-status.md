@@ -174,6 +174,32 @@ protocol remain unchanged. A turn must still complete the de-energized 150 ms
 encoder-stability settling gate, followed by the executor's 500 ms
 `SAFE_PAUSE`, before a following straight primitive can start.
 
+The post-`5c2d1c0` Vision run measured 350 mm edge endpoint displacements of
+about 362.1, 364.4, 378.2, and 380.2 mm (mean 371.2 mm). The physical-fleet
+forward conversion is therefore provisionally reduced from 607 to 572 counts
+per 350 mm (`1.6343 counts/mm`). This is one common left/right target and also
+applies to bounded correction drives; it is not differential steering. Because
+the Server log did not contain final encoder counts, this remains a Vision
+endpoint calibration that requires controlled physical confirmation.
+
+The same run showed large lateral displacement with small final heading. The
+first unmeasured bias in the former control path was the fixed right-wheel
+feed-forward advantage: +5 PWM at forward start and cruise, before the first
+50 ms velocity sample. Physical-fleet trajectory and correction forward
+profiles now start and cruise from equal per-profile baselines; measured
+cumulative/interval feedback alone creates a left/right difference. The legacy
+`NORMAL` profile retains its verified feed-forward values. The interval
+normalization now rounds rather than truncating, so a one-count difference over
+a 51 ms sample remains visible. Gains and the existing 15/10 PWM correction
+limits are unchanged.
+
+RobotProtocol v1 has no normal-completion field carrying encoder counts or a
+motion summary: STATUS contains pose/progress, and ARRIVED contains only the
+node ID. Reusing MOTOR_FAULT diagnostics for successful motion would change
+their semantics and could trigger Server fault handling. A USB-free Server-side
+summary therefore requires an explicitly coordinated protocol/Server change
+and is not implemented here.
+
 ## Vision node-correction integration (physically exercised; tuning ongoing)
 
 The integration branch adds bounded post-arrival correction primitives to the live physical-fleet profile. A later physical run traversed nodes `6 -> 11 -> 6 -> 7 -> 8 -> 9 -> 10 -> 9 -> 8 -> 7 -> 6`; post-correction position error was generally about 4--33 mm. Pre-correction error was about 23--145 mm and typically required three to six correction primitives per node. The run eventually faulted with `WHEEL_MISMATCH` detail `65539` during a 120 mm correction drive while Vision also transitioned to `POSE_LOST`.
@@ -292,6 +318,14 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 - The forward ISR polarity, acceleration/deceleration values, PWM baseline, and count synchronization were transferred into `MotionController`; the reference file was not moved or rewritten.
 
 ## Build validation
+
+- On 2026-09-03, all five host tests passed after the post-`5c2d1c0` drift
+  analysis. Regressions verify the 572/572 target for 350 mm, equal
+  physical-fleet/correction forward baseline PWM, preservation of legacy
+  NORMAL-profile PWM, one-count interval-error rounding, bounded P+D response,
+  correction diagnostics, and existing safety transitions. All fourteen
+  PlatformIO profiles built successfully without upload. The live
+  physical-fleet build used 47,396 bytes RAM and 785,981 bytes flash.
 
 - On 2026-09-03, all five host tests passed after adding bounded forward PD
   synchronization. Tests cover correction direction, the unchanged 15-PWM

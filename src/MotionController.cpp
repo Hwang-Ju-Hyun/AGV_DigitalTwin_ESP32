@@ -12,6 +12,8 @@ namespace
     constexpr int kForwardRightStartPwm = 55;
     constexpr int kForwardLeftCruisePwm = 80;
     constexpr int kForwardRightCruisePwm = 85;
+    constexpr int kPhysicalFleetForwardStartPwm = 50;
+    constexpr int kPhysicalFleetForwardCruisePwm = 80;
     constexpr int32_t kForwardAccelCounts = 100;
     constexpr int32_t kForwardDecelCounts = 160;
     constexpr int kForwardMinPwm = 42;
@@ -25,9 +27,9 @@ namespace
     // PWM stays at the existing proven floor; only start/cruise ceilings and
     // ramp distances are reduced.
     constexpr int kCorrectionForwardLeftStartPwm = 46;
-    constexpr int kCorrectionForwardRightStartPwm = 51;
+    constexpr int kCorrectionForwardRightStartPwm = 46;
     constexpr int kCorrectionForwardLeftCruisePwm = 62;
-    constexpr int kCorrectionForwardRightCruisePwm = 67;
+    constexpr int kCorrectionForwardRightCruisePwm = 62;
     constexpr int32_t kCorrectionForwardAccelCounts = 45;
     constexpr int32_t kCorrectionForwardDecelCounts = 70;
     constexpr int kCorrectionForwardMaxPwm = 75;
@@ -411,7 +413,16 @@ MotionController::StartResult MotionController::startMotion(
                                kCorrectionForwardRightStartPwm);
         }
         else
-            applyMotionOutputs(mode, kForwardLeftStartPwm, kForwardRightStartPwm);
+        {
+            const bool physicalFleetProfile =
+                profile == Profile::PHYSICAL_FLEET;
+            applyMotionOutputs(
+                mode,
+                physicalFleetProfile ? kPhysicalFleetForwardStartPwm
+                                     : kForwardLeftStartPwm,
+                physicalFleetProfile ? kPhysicalFleetForwardStartPwm
+                                     : kForwardRightStartPwm);
+        }
     }
     else
     {
@@ -582,13 +593,21 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
         const int32_t decelCounts = correctionProfile
             ? kCorrectionForwardDecelCounts : kForwardDecelCounts;
         const int leftStartPwm = correctionProfile
-            ? kCorrectionForwardLeftStartPwm : kForwardLeftStartPwm;
+            ? kCorrectionForwardLeftStartPwm
+            : (m_Profile == Profile::PHYSICAL_FLEET
+                ? kPhysicalFleetForwardStartPwm : kForwardLeftStartPwm);
         const int rightStartPwm = correctionProfile
-            ? kCorrectionForwardRightStartPwm : kForwardRightStartPwm;
+            ? kCorrectionForwardRightStartPwm
+            : (m_Profile == Profile::PHYSICAL_FLEET
+                ? kPhysicalFleetForwardStartPwm : kForwardRightStartPwm);
         const int leftCruisePwm = correctionProfile
-            ? kCorrectionForwardLeftCruisePwm : kForwardLeftCruisePwm;
+            ? kCorrectionForwardLeftCruisePwm
+            : (m_Profile == Profile::PHYSICAL_FLEET
+                ? kPhysicalFleetForwardCruisePwm : kForwardLeftCruisePwm);
         const int rightCruisePwm = correctionProfile
-            ? kCorrectionForwardRightCruisePwm : kForwardRightCruisePwm;
+            ? kCorrectionForwardRightCruisePwm
+            : (m_Profile == Profile::PHYSICAL_FLEET
+                ? kPhysicalFleetForwardCruisePwm : kForwardRightCruisePwm);
 
         const float accelRatio = clampUnit(
             static_cast<float>(slowerProgress)
@@ -663,9 +682,10 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
             const int64_t intervalDifference =
                 static_cast<int64_t>(m_LeftIntervalDelta)
                 - static_cast<int64_t>(m_RightIntervalDelta);
-            m_IntervalVelocityError = static_cast<int32_t>(
-                intervalDifference * kForwardSyncSampleMs
-                / static_cast<int64_t>(syncElapsedMs));
+            m_IntervalVelocityError = static_cast<int32_t>(std::lround(
+                static_cast<double>(intervalDifference)
+                * static_cast<double>(kForwardSyncSampleMs)
+                / static_cast<double>(syncElapsedMs)));
             m_LastSyncLeft = leftCount;
             m_LastSyncRight = rightCount;
             m_LastSyncSampleMs = nowMs;

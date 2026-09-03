@@ -133,7 +133,10 @@ namespace AppConfig
     static constexpr float kPhysicalFleetStartHeadingRad = 0.0f;
     static constexpr float kPhysicalFleetScaleMmPerMapUnit = 50.0f;
     static constexpr float kPhysicalFleetCruiseSpeedMmPerSecond = 80.0f;
-    static constexpr float kForwardCountsPerMm = 520.0f / 300.0f;
+    // Vision endpoint calibration from four 350 mm fleet edges: their mean
+    // displacement was 371.2 mm, so the former 607-count request is reduced
+    // to 572 counts. This common scale never biases left versus right.
+    static constexpr float kForwardCountsPerMm = 572.0f / 350.0f;
     // Both wheels must travel the same final distance. Straight-line trim is
     // handled only by the existing PWM feed-forward/synchronization path.
     static constexpr float kForwardLeftTargetScale = 1.0f;

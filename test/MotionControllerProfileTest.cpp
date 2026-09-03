@@ -34,8 +34,7 @@ namespace
 
     void testPhysicalFleetForwardTargetsRemainEqual()
     {
-        // round(350 mm * 520 counts / 300 mm)
-        constexpr int32_t kNominal350MmTarget = 607;
+        constexpr int32_t kNominal350MmTarget = 572;
         resetArduino();
         MotionController motion;
         motion.begin();
@@ -53,9 +52,9 @@ namespace
         assert(snapshot.profile
                == MotionController::Profile::PHYSICAL_FLEET);
         assert(snapshot.leftPwm == 50);
-        assert(snapshot.rightPwm == 55);
+        assert(snapshot.rightPwm == 50);
 
-        pulseForward(602, 602);
+        pulseForward(567, 567);
         assert(motion.update(20) == MotionController::UpdateResult::RUNNING);
         snapshot = motion.snapshot();
         assert(snapshot.leftPwm > 0);
@@ -77,6 +76,8 @@ namespace
         assert(snapshot.leftTargetCount == 100);
         assert(snapshot.rightTargetCount == 100);
         assert(snapshot.profile == MotionController::Profile::NORMAL);
+        assert(snapshot.leftPwm == 50);
+        assert(snapshot.rightPwm == 55);
         motion.stopImmediately();
         assert(motion.outputsSafe());
     }
@@ -96,7 +97,7 @@ namespace
         assert(snapshot.leftTargetCount == 100);
         assert(snapshot.rightTargetCount == 100);
         assert(snapshot.leftPwm == 46);
-        assert(snapshot.rightPwm == 51);
+        assert(snapshot.rightPwm == 46);
         drive.stopImmediately();
         assert(drive.outputsSafe());
 
@@ -192,6 +193,29 @@ namespace
         assert(snapshot.leftPwm <= 75);
         assert(snapshot.rightPwm <= 75);
     }
+
+    void testForwardIntervalNormalizationDoesNotTruncateOneCount()
+    {
+        resetArduino();
+        MotionController motion;
+        motion.begin();
+        assert(motion.startMotion(MotionController::Mode::FORWARD,
+                                  100,
+                                  10,
+                                  MotionController::Profile::PHYSICAL_FLEET)
+               == MotionController::StartResult::STARTED);
+
+        // A 1-count right lead over a 51 ms sample used to truncate to zero.
+        pulseForward(0, 1);
+        assert(motion.update(61) == MotionController::UpdateResult::RUNNING);
+        const auto snapshot = motion.snapshot();
+        assert(snapshot.leftIntervalDelta == 0);
+        assert(snapshot.rightIntervalDelta == 1);
+        assert(snapshot.cumulativeSyncError == -1);
+        assert(snapshot.intervalVelocityError == -1);
+        assert(snapshot.syncCorrection == -1);
+        assert(snapshot.leftPwm > snapshot.rightPwm);
+    }
 }
 
 int main()
@@ -210,5 +234,6 @@ int main()
     testCorrectionProfilesStartSlower();
     testWheelMismatchStillLatchesSafeOutputs();
     testForwardSyncUsesBoundedCumulativeAndIntervalError();
+    testForwardIntervalNormalizationDoesNotTruncateOneCount();
     return 0;
 }
