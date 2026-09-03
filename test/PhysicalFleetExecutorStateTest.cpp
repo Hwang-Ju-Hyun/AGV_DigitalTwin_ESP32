@@ -35,6 +35,10 @@ namespace
             MotionController::Fault::STALL;
         bool forceUnsafe = false;
         uint32_t stopCount = 0;
+        int32_t leftProgress = 0;
+        int32_t rightProgress = 0;
+        int32_t leftTarget = 0;
+        int32_t rightTarget = 0;
         std::vector<StartCall> starts;
     };
 
@@ -785,6 +789,77 @@ namespace
                == PhysicalFleetExecutor::State::FAULT_LATCHED);
         assert(!executor.correctionReportPending(report));
     }
+
+    void testCorrectionWheelMismatchFreezesTaggedDiagnostic()
+    {
+        resetFake();
+        MotionController motion;
+        PhysicalFleetExecutor executor(motion);
+        executor.begin(1, 0.0f);
+        enterNodeWait(executor, 60, 1, 2);
+
+        const auto drive = correction(
+            60,
+            2,
+            1,
+            RobotProtocol::NodeCorrectionAction::DRIVE_FORWARD,
+            120.0f);
+        assert(executor.acceptNodeCorrection(drive, true, 500)
+               == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
+
+        // Reproduce the useful shape of the field failure: the left wheel is
+        // near its target while the right wheel trails by more than the
+        // unchanged controller mismatch limit.
+        g_Fake.leftProgress = 205;
+        g_Fake.rightProgress = 117;
+        g_Fake.leftTarget = 213;
+        g_Fake.rightTarget = 203;
+        g_Fake.injectedFault = MotionController::Fault::WHEEL_MISMATCH;
+        g_Fake.updateResult = MotionController::UpdateResult::FAULTED;
+        executor.update(510, true);
+
+        assert(executor.state()
+               == PhysicalFleetExecutor::State::FAULT_LATCHED);
+        assert(executor.fault()
+               == PhysicalFleetExecutor::Fault::MOTION_CONTROLLER);
+        assert(executor.faultDetail() == 65539U);
+        assert(motion.outputsSafe());
+
+        PhysicalFleetExecutor::WheelMismatchDiagnostic diagnostic;
+        assert(executor.wheelMismatchDiagnostic(diagnostic));
+        assert(diagnostic.operation
+               == PhysicalFleetExecutor::DiagnosticOperation::
+                      CORRECTION_DRIVE);
+        assert(diagnostic.motionMode == MotionController::Mode::FORWARD);
+        assert(diagnostic.motionProfile
+               == MotionController::Profile::CORRECTION);
+        assert(diagnostic.leftProgress == 205);
+        assert(diagnostic.rightProgress == 117);
+        assert(diagnostic.leftTarget == 213);
+        assert(diagnostic.rightTarget == 203);
+
+        assert(RobotProtocol::encodeMotorFaultDiagnosticContext(
+                   static_cast<uint8_t>(diagnostic.operation),
+                   static_cast<uint8_t>(diagnostic.motionMode),
+                   static_cast<uint8_t>(diagnostic.motionProfile))
+               == 0xD0010312UL);
+        assert(RobotProtocol::encodeMotorFaultDiagnosticValue(
+                   RobotProtocol::MotorFaultDiagnosticTag::LEFT_PROGRESS,
+                   diagnostic.leftProgress)
+               == 0xD10000CDUL);
+        assert(RobotProtocol::encodeMotorFaultDiagnosticValue(
+                   RobotProtocol::MotorFaultDiagnosticTag::RIGHT_PROGRESS,
+                   diagnostic.rightProgress)
+               == 0xD2000075UL);
+        assert(RobotProtocol::encodeMotorFaultDiagnosticValue(
+                   RobotProtocol::MotorFaultDiagnosticTag::LEFT_TARGET,
+                   diagnostic.leftTarget)
+               == 0xD30000D5UL);
+        assert(RobotProtocol::encodeMotorFaultDiagnosticValue(
+                   RobotProtocol::MotorFaultDiagnosticTag::RIGHT_TARGET,
+                   diagnostic.rightTarget)
+               == 0xD40000CBUL);
+    }
 }
 
 void MotionController::begin()
@@ -883,8 +958,12 @@ MotionController::Snapshot MotionController::snapshot() const
 {
     Snapshot result;
     result.targetCount = m_TargetCount;
-    result.leftTargetCount = m_LeftTargetCount;
-    result.rightTargetCount = m_RightTargetCount;
+    result.leftTargetCount = g_Fake.leftTarget != 0
+        ? g_Fake.leftTarget : m_LeftTargetCount;
+    result.rightTargetCount = g_Fake.rightTarget != 0
+        ? g_Fake.rightTarget : m_RightTargetCount;
+    result.leftProgress = g_Fake.leftProgress;
+    result.rightProgress = g_Fake.rightProgress;
     result.leftPwm = m_LeftPwm;
     result.rightPwm = m_RightPwm;
     result.elapsedMs = m_FinalElapsedMs;
@@ -934,5 +1013,6 @@ int main()
     testEmergencyStopAndCancelAreSafe();
     testCorrectionCancelAndNetworkLossCannotResumeOrReplay();
     testFailedReportAttemptIsNotRetried();
+    testCorrectionWheelMismatchFreezesTaggedDiagnostic();
     return 0;
 }

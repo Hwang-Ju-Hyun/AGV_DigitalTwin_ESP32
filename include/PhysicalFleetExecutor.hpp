@@ -60,6 +60,27 @@ public:
         CORRECTION_REPORT_SEND_FAILED
     };
 
+    enum class DiagnosticOperation : uint8_t
+    {
+        NONE = 0,
+        TRAJECTORY_DRIVE = 1,
+        TRAJECTORY_TURN = 2,
+        CORRECTION_DRIVE = 3,
+        CORRECTION_TURN = 4
+    };
+
+    struct WheelMismatchDiagnostic
+    {
+        DiagnosticOperation operation = DiagnosticOperation::NONE;
+        MotionController::Mode motionMode = MotionController::Mode::NONE;
+        MotionController::Profile motionProfile =
+            MotionController::Profile::NORMAL;
+        int32_t leftProgress = 0;
+        int32_t rightProgress = 0;
+        int32_t leftTarget = 0;
+        int32_t rightTarget = 0;
+    };
+
     explicit PhysicalFleetExecutor(MotionController& motion);
 
     void begin(uint32_t startNodeID, float startWorldHeadingRad);
@@ -90,6 +111,7 @@ public:
     uint32_t routeID() const { return m_HasCommand ? m_Command.routeID : 0; }
     uint32_t currentNodeID() const { return m_CurrentNodeID; }
     uint16_t waypointIndex() const { return m_Cursor; }
+    bool wheelMismatchDiagnostic(WheelMismatchDiagnostic& out) const;
 
     static const char* stateName(State state);
     static const char* acceptResultName(AcceptResult result);
@@ -134,6 +156,7 @@ private:
     void stageActiveCorrectionFault(uint32_t detail);
     void resetCorrectionSession(uint32_t completedRouteID);
     void clearCommand();
+    void captureWheelMismatchDiagnostic();
     void latchFault(Fault fault, uint32_t detail);
     bool terminalLatch() const;
 
@@ -167,4 +190,6 @@ private:
     RobotProtocol::NodeCorrectionReportPayload m_PendingCorrectionReport{};
     uint32_t m_CorrectionStartedMs = 0;
     State m_AfterCorrectionReportState = State::NODE_WAIT;
+    bool m_HasWheelMismatchDiagnostic = false;
+    WheelMismatchDiagnostic m_WheelMismatchDiagnostic{};
 };

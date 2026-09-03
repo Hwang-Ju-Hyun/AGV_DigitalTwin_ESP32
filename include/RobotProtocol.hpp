@@ -86,6 +86,26 @@ namespace RobotProtocol
         OBSTACLE_DETECTED = 102
     };
 
+    // WHEEL_MISMATCH keeps its legacy MOTOR_FAULT detail as the first ERROR.
+    // These tagged follow-up details carry a frozen fault snapshot without
+    // changing ERROR_PACKET or ErrorPayload. Value records use signed 24-bit
+    // two's-complement counts in bits 23..0.
+    constexpr uint8_t kMotorFaultDiagnosticVersion = 1;
+    enum class MotorFaultDiagnosticTag : uint8_t
+    {
+        CONTEXT = 0xD0,
+        LEFT_PROGRESS = 0xD1,
+        RIGHT_PROGRESS = 0xD2,
+        LEFT_TARGET = 0xD3,
+        RIGHT_TARGET = 0xD4
+    };
+
+    uint32_t encodeMotorFaultDiagnosticContext(uint8_t operation,
+                                               uint8_t motionMode,
+                                               uint8_t motionProfile);
+    uint32_t encodeMotorFaultDiagnosticValue(MotorFaultDiagnosticTag tag,
+                                             int32_t value);
+
     struct PacketBodyHeader
     {
         PacketID packetID = PacketID::ERROR_PACKET;

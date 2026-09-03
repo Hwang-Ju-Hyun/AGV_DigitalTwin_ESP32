@@ -5,6 +5,24 @@
 
 namespace RobotProtocol
 {
+    uint32_t encodeMotorFaultDiagnosticContext(uint8_t operation,
+                                               uint8_t motionMode,
+                                               uint8_t motionProfile)
+    {
+        return (static_cast<uint32_t>(MotorFaultDiagnosticTag::CONTEXT) << 24)
+             | (static_cast<uint32_t>(kMotorFaultDiagnosticVersion) << 16)
+             | (static_cast<uint32_t>(operation) << 8)
+             | ((static_cast<uint32_t>(motionMode) & 0x0FUL) << 4)
+             | (static_cast<uint32_t>(motionProfile) & 0x0FUL);
+    }
+
+    uint32_t encodeMotorFaultDiagnosticValue(MotorFaultDiagnosticTag tag,
+                                             int32_t value)
+    {
+        return (static_cast<uint32_t>(tag) << 24)
+             | (static_cast<uint32_t>(value) & 0x00FFFFFFUL);
+    }
+
     PacketWriter::PacketWriter(std::vector<uint8_t>& buffer)
         : m_Buffer(buffer)
     {

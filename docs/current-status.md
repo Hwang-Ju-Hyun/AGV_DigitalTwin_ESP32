@@ -165,6 +165,28 @@ The integration branch adds bounded post-arrival correction primitives to the li
 - A primitive is limited to 20--120 mm or 5--90 degrees, with at most eight accepted primitives for one completed edge. Correction motion reuses the existing encoder settling, output-invariant, disconnect, BOOT E-stop, and motion-fault gates.
 - `NODE_CORRECTION_REPORT=202` returns `COMPLETED`, `REJECTED`, or `FAULT`. A correction turn updates the ESP32 status heading by the commanded signed angle; correction motion does not alter the completed node or the stored route-local forward/left coordinates. The firmware sends a fresh final `STATUS` before the report on the same TCP stream so the Server observes the corrected heading before planning the next edge.
 - Correction drive and turn primitives now select a dedicated lower-speed PWM profile. The established minimum PWM floors remain unchanged to avoid introducing an unmeasured stall threshold; start/cruise ceilings and correction ramp distances are reduced.
+- A physical-fleet `WHEEL_MISMATCH` still sends the legacy
+  `ERROR_PACKET(errorCode=MOTOR_FAULT, detail=65539)` first. It then sends five
+  more `MOTOR_FAULT` ERROR packets containing a frozen fault-time snapshot.
+  This adds no packet ID or field and does not change the ERROR payload layout.
+  The tagged `detail` layout is:
+  - `0xD0VVOOMP`: context, where `VV=01`, bits 15..8 (`OO`) are the operation,
+    bits 7..4 are `MotionController::Mode`, and bits 3..0 are its profile.
+  - `0xD1xxxxxx`: left normalized encoder progress.
+  - `0xD2xxxxxx`: right normalized encoder progress.
+  - `0xD3xxxxxx`: left target count.
+  - `0xD4xxxxxx`: right target count.
+  Count values are signed 24-bit two's-complement. Operation codes are
+  `1=TRAJECTORY_DRIVE`, `2=TRAJECTORY_TURN`, `3=CORRECTION_DRIVE`, and
+  `4=CORRECTION_TURN`; motion-mode codes are `1=FORWARD`, `2=TURN_CW`, and
+  `3=TURN_CCW`; profiles are `0=NORMAL`, `1=PHYSICAL_FLEET`, and
+  `2=CORRECTION`. The Server should associate the five immediately following
+  tagged records with the preceding legacy `65539` record on that AGV TCP
+  stream. The snapshot is captured before the executor's safe-stop path can
+  clear runtime mode information.
+- This diagnostic change does not alter the 80-count mismatch threshold,
+  wrong-direction/overrun/stall/timeout/settling checks, fault latching, PWM
+  zero, or `STBY=LOW` behavior.
 - The matching Server integration must dispatch final one-edge trajectories, treat their normal `ARRIVED` as the coarse node-ready point, issue correction primitives from fresh verified Vision measurements, and dispatch the next edge only after correction completes or is unnecessary.
 
 ## Straight calibration diagnostics
@@ -251,6 +273,12 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 - The forward ISR polarity, acceleration/deceleration values, PWM baseline, and count synchronization were transferred into `MotionController`; the reference file was not moved or rewritten.
 
 ## Build validation
+
+- On 2026-09-03, all five host tests passed after adding the frozen
+  `WHEEL_MISMATCH` diagnostic regression (`CORRECTION_DRIVE`, progress
+  `L=205/R=117`, targets `L=213/R=203`, legacy detail `65539`, safe outputs).
+  All fourteen PlatformIO profiles then built successfully without upload.
+  The live physical-fleet build used 47,364 bytes RAM and 785,749 bytes flash.
 
 - On 2026-09-03, all five host tests passed. The new real-controller host test
   verified physical-fleet left/right targets of 205/195 for a nominal 200,

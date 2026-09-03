@@ -83,6 +83,8 @@ void PhysicalFleetExecutor::begin(uint32_t startNodeID,
     m_State = State::IDLE;
     m_Fault = Fault::NONE;
     m_FaultDetail = 0;
+    m_HasWheelMismatchDiagnostic = false;
+    m_WheelMismatchDiagnostic = {};
     resetCorrectionSession(0);
 }
 
@@ -429,6 +431,8 @@ void PhysicalFleetExecutor::update(uint32_t nowMs, bool sessionReady)
     if (m_Motion.faultLatched()
         || result == MotionController::UpdateResult::FAULTED)
     {
+        if (m_Motion.fault() == MotionController::Fault::WHEEL_MISMATCH)
+            captureWheelMismatchDiagnostic();
         const uint32_t detail = kMotionFaultPrefix
             | (static_cast<uint32_t>(m_Motion.fault()) & 0xFFFFUL);
         if (correctionMotion)
@@ -491,6 +495,15 @@ void PhysicalFleetExecutor::update(uint32_t nowMs, bool sessionReady)
     }
 
     handleMotionComplete(nowMs);
+}
+
+bool PhysicalFleetExecutor::wheelMismatchDiagnostic(
+    WheelMismatchDiagnostic& out) const
+{
+    if (!m_HasWheelMismatchDiagnostic)
+        return false;
+    out = m_WheelMismatchDiagnostic;
+    return true;
 }
 
 void PhysicalFleetExecutor::startCurrentWaypoint(uint32_t nowMs)
@@ -977,6 +990,38 @@ void PhysicalFleetExecutor::clearCommand()
     m_Primitive = PrimitiveKind::NONE;
     m_MotionMode = MotionController::Mode::NONE;
     m_RemainingTurnQuarters = 0;
+}
+
+void PhysicalFleetExecutor::captureWheelMismatchDiagnostic()
+{
+    const MotionController::Snapshot snapshot = m_Motion.snapshot();
+    DiagnosticOperation operation = DiagnosticOperation::NONE;
+    switch (m_Primitive)
+    {
+    case PrimitiveKind::DRIVE:
+        operation = DiagnosticOperation::TRAJECTORY_DRIVE;
+        break;
+    case PrimitiveKind::TURN:
+        operation = DiagnosticOperation::TRAJECTORY_TURN;
+        break;
+    case PrimitiveKind::CORRECTION_DRIVE:
+        operation = DiagnosticOperation::CORRECTION_DRIVE;
+        break;
+    case PrimitiveKind::CORRECTION_TURN:
+        operation = DiagnosticOperation::CORRECTION_TURN;
+        break;
+    default:
+        break;
+    }
+
+    m_WheelMismatchDiagnostic.operation = operation;
+    m_WheelMismatchDiagnostic.motionMode = snapshot.mode;
+    m_WheelMismatchDiagnostic.motionProfile = snapshot.profile;
+    m_WheelMismatchDiagnostic.leftProgress = snapshot.leftProgress;
+    m_WheelMismatchDiagnostic.rightProgress = snapshot.rightProgress;
+    m_WheelMismatchDiagnostic.leftTarget = snapshot.leftTargetCount;
+    m_WheelMismatchDiagnostic.rightTarget = snapshot.rightTargetCount;
+    m_HasWheelMismatchDiagnostic = true;
 }
 
 void PhysicalFleetExecutor::stageCorrectionReport(

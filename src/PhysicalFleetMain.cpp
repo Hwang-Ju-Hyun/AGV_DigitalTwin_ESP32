@@ -324,9 +324,54 @@ namespace
         }
         if (!faultReported && sessionReady())
         {
-            faultReported = robotClient.sendError(
+            bool sent = robotClient.sendError(
                 RobotProtocol::ErrorCode::MOTOR_FAULT,
                 fleetExecutor.faultDetail());
+            PhysicalFleetExecutor::WheelMismatchDiagnostic diagnostic;
+            if (sent && fleetExecutor.wheelMismatchDiagnostic(diagnostic))
+            {
+                const uint32_t details[] = {
+                    RobotProtocol::encodeMotorFaultDiagnosticContext(
+                        static_cast<uint8_t>(diagnostic.operation),
+                        static_cast<uint8_t>(diagnostic.motionMode),
+                        static_cast<uint8_t>(diagnostic.motionProfile)),
+                    RobotProtocol::encodeMotorFaultDiagnosticValue(
+                        RobotProtocol::MotorFaultDiagnosticTag::LEFT_PROGRESS,
+                        diagnostic.leftProgress),
+                    RobotProtocol::encodeMotorFaultDiagnosticValue(
+                        RobotProtocol::MotorFaultDiagnosticTag::RIGHT_PROGRESS,
+                        diagnostic.rightProgress),
+                    RobotProtocol::encodeMotorFaultDiagnosticValue(
+                        RobotProtocol::MotorFaultDiagnosticTag::LEFT_TARGET,
+                        diagnostic.leftTarget),
+                    RobotProtocol::encodeMotorFaultDiagnosticValue(
+                        RobotProtocol::MotorFaultDiagnosticTag::RIGHT_TARGET,
+                        diagnostic.rightTarget)
+                };
+                for (const uint32_t detail : details)
+                {
+                    if (!robotClient.sendError(
+                            RobotProtocol::ErrorCode::MOTOR_FAULT, detail))
+                    {
+                        sent = false;
+                        break;
+                    }
+                }
+                if (sent)
+                {
+                    Serial.printf(
+                        "[WHEEL_MISMATCH] operation=%u mode=%u profile=%u "
+                        "L=%ld/%ld R=%ld/%ld\n",
+                        static_cast<unsigned>(diagnostic.operation),
+                        static_cast<unsigned>(diagnostic.motionMode),
+                        static_cast<unsigned>(diagnostic.motionProfile),
+                        static_cast<long>(diagnostic.leftProgress),
+                        static_cast<long>(diagnostic.leftTarget),
+                        static_cast<long>(diagnostic.rightProgress),
+                        static_cast<long>(diagnostic.rightTarget));
+                }
+            }
+            faultReported = sent;
         }
     }
 
