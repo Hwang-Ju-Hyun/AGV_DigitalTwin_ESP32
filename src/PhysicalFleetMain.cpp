@@ -431,6 +431,38 @@ namespace
                       static_cast<unsigned long>(fleetExecutor.currentNodeID()),
                       static_cast<unsigned>(motion.mode),
                       motion.outputsSafe ? 1U : 0U);
+        const bool trajectoryTurn =
+            motion.profile == MotionController::Profile::PHYSICAL_FLEET
+            && (motion.mode == MotionController::Mode::TURN_CW
+                || motion.mode == MotionController::Mode::TURN_CCW);
+        if (state == PhysicalFleetExecutor::State::RUNNING && trajectoryTurn)
+        {
+            Serial.printf(
+                "[TRAJECTORY_TURN_START] wp=%u mode=%u "
+                "targetL=%ld targetR=%ld\n",
+                fleetExecutor.waypointIndex(),
+                static_cast<unsigned>(motion.mode),
+                static_cast<long>(motion.leftTargetCount),
+                static_cast<long>(motion.rightTargetCount));
+        }
+        else if (state == PhysicalFleetExecutor::State::SAFE_PAUSE
+                 && trajectoryTurn)
+        {
+            Serial.printf(
+                "[TRAJECTORY_TURN_END] wp=%u mode=%u "
+                "rawL=%ld rawR=%ld L=%ld/%ld R=%ld/%ld "
+                "elapsedMs=%lu safe=%u\n",
+                fleetExecutor.waypointIndex(),
+                static_cast<unsigned>(motion.mode),
+                static_cast<long>(motion.rawLeftCount),
+                static_cast<long>(motion.rawRightCount),
+                static_cast<long>(motion.leftProgress),
+                static_cast<long>(motion.leftTargetCount),
+                static_cast<long>(motion.rightProgress),
+                static_cast<long>(motion.rightTargetCount),
+                static_cast<unsigned long>(motion.elapsedMs),
+                motion.outputsSafe ? 1U : 0U);
+        }
         if (state == PhysicalFleetExecutor::State::FAULT_LATCHED)
         {
             Serial.printf("[FAULT] %s detail=%lu; reboot required\n",

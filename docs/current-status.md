@@ -319,6 +319,32 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 ## Build validation
 
+- The pre-departure correction handoff is explicitly regression-tested as
+  `CORRECTION_RUNNING -> CORRECTION_SETTLING -> CORRECTION_REPORT_PENDING ->
+  NODE_WAIT -> READY -> RUNNING`. The completed correction heading remains in
+  STATUS, while the next forward start replaces the prior turn target/profile
+  and does not start another turn. A trajectory received during correction
+  running or settling, and any trajectory after an active cancel, disconnect,
+  E-stop, motion fault, or report-send failure, is rejected with safe outputs.
+  `PhysicalFleetMain` continues to send STATUS before CORRECTION_REPORT on the
+  same stream. Here `NODE_WAIT` is the protocol-safe idle state after a
+  completed edge; a cold-boot `IDLE` correction is deliberately rejected
+  because it has no just-completed route ID to bind. All five host tests passed
+  after this state-flow expansion.
+
+- The current Server contract does not guarantee that every post-correction
+  edge is forward-only. It anchors the next one-edge build to the accepted
+  Vision heading: a heading difference within 10 degrees produces an endpoint-
+  only forward trajectory, while a larger corner still inserts a nominal
+  `ROTATE_IN_PLACE`. Normal trajectory turns therefore remain at 163 CW / 159
+  CCW counts with the PHYSICAL_FLEET PWM profile and no correction coast
+  subtraction. Compact `TRAJECTORY_TURN_START/END` serial diagnostics now
+  preserve target, raw/normalized final counts, elapsed time, and safe output
+  state for an isolated turn-calibration comparison before any tuning. The
+  physical-fleet locked/live and turn-calibration locked/CW/CCW profiles all
+  built successfully without upload; the live fleet image used 47,396 bytes
+  RAM and 786,869 bytes flash.
+
 - On 2026-09-03, correction-turn Vision samples showed a nearly fixed stop
   overshoot rather than a proportional angle-scale error: about 14 encoder
   counts CW and 12 counts CCW across requests from 11.78 through 73.93

@@ -536,7 +536,7 @@ namespace
         resetFake();
         MotionController motion;
         PhysicalFleetExecutor executor(motion);
-        executor.begin(1, 0.0f);
+        executor.begin(1, radians(5.0f));
         enterNodeWait(executor, 13, 1, 2);
 
         const auto turn = correction(
@@ -545,6 +545,14 @@ namespace
         assert(executor.acceptNodeCorrection(turn, true, 100)
                == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
         const size_t correctionStarts = g_Fake.starts.size();
+        assert(std::fabs(executor.buildStatus().heading - radians(15.0f))
+               < kFloatTolerance);
+        g_Fake.updateResult = MotionController::UpdateResult::SETTLING;
+        executor.update(105, true);
+        assert(executor.state()
+               == PhysicalFleetExecutor::State::CORRECTION_SETTLING);
+        assert(motion.outputsSafe());
+        assert(g_Fake.starts.size() == correctionStarts);
         completeCurrentMotion(executor, 110);
 
         RobotProtocol::NodeCorrectionReportPayload report;
@@ -553,10 +561,14 @@ namespace
                == PhysicalFleetExecutor::State::CORRECTION_REPORT_PENDING);
         assert(motion.outputsSafe());
         assert(g_Fake.starts.size() == correctionStarts);
+        assert(std::fabs(executor.buildStatus().heading - radians(25.0f))
+               < kFloatTolerance);
 
         executor.markCorrectionReportSendResult(true);
         assert(executor.state() == PhysicalFleetExecutor::State::NODE_WAIT);
         assert(motion.outputsSafe());
+        assert(std::fabs(executor.buildStatus().heading - radians(25.0f))
+               < kFloatTolerance);
 
         const auto nextEdge = oneEdgeCommand(14, 2, 3);
         assert(executor.acceptTrajectory(nextEdge, true, 120)
@@ -566,6 +578,70 @@ namespace
         executor.update(120, true);
         assert(g_Fake.starts.size() == correctionStarts + 1);
         assert(g_Fake.starts.back().mode == MotionController::Mode::FORWARD);
+        assert(g_Fake.starts.back().profile
+               == MotionController::Profile::PHYSICAL_FLEET);
+        assert(g_Fake.starts.back().targetCount
+               == static_cast<int32_t>(std::lround(
+                   100.0f * AppConfig::kForwardCountsPerMm)));
+        assert(std::fabs(executor.buildStatus().heading - radians(25.0f))
+               < kFloatTolerance);
+    }
+
+    void testColdIdleCorrectionRequiresCompletedEdgeBinding()
+    {
+        resetFake();
+        MotionController motion;
+        PhysicalFleetExecutor executor(motion);
+        executor.begin(1, 0.0f);
+
+        const auto turn = correction(
+            1, 1, 1, RobotProtocol::NodeCorrectionAction::TURN_CCW,
+            radians(20.0f));
+        assert(executor.acceptNodeCorrection(turn, true, 100)
+               == PhysicalFleetExecutor::CorrectionAcceptResult::REJECTED_BUSY);
+        assert(g_Fake.starts.empty());
+        assert(motion.outputsSafe());
+
+        RobotProtocol::NodeCorrectionReportPayload report;
+        assert(executor.correctionReportPending(report));
+        assert(report.result == RobotProtocol::NodeCorrectionResult::REJECTED);
+        executor.markCorrectionReportSendResult(true);
+        assert(executor.state() == PhysicalFleetExecutor::State::IDLE);
+    }
+
+    void testTrajectoryDuringCorrectionRunningOrSettlingLatchesSafeFault()
+    {
+        for (const auto updateResult : {
+                 MotionController::UpdateResult::RUNNING,
+                 MotionController::UpdateResult::SETTLING })
+        {
+            resetFake();
+            MotionController motion;
+            PhysicalFleetExecutor executor(motion);
+            executor.begin(1, 0.0f);
+            enterNodeWait(executor, 14, 1, 2);
+
+            const auto turn = correction(
+                14, 2, 1, RobotProtocol::NodeCorrectionAction::TURN_CCW,
+                radians(20.0f));
+            assert(executor.acceptNodeCorrection(turn, true, 100)
+                   == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
+            g_Fake.updateResult = updateResult;
+            executor.update(110, true);
+            assert(executor.state()
+                   == (updateResult == MotionController::UpdateResult::RUNNING
+                           ? PhysicalFleetExecutor::State::CORRECTION_RUNNING
+                           : PhysicalFleetExecutor::State::CORRECTION_SETTLING));
+
+            const size_t startCount = g_Fake.starts.size();
+            const auto nextEdge = oneEdgeCommand(15, 2, 3);
+            assert(executor.acceptTrajectory(nextEdge, true, 120)
+                   == PhysicalFleetExecutor::AcceptResult::REJECTED_LATCHED);
+            assert(executor.state()
+                   == PhysicalFleetExecutor::State::FAULT_LATCHED);
+            assert(g_Fake.starts.size() == startCount);
+            assert(motion.outputsSafe());
+        }
     }
 
     void testFailedCorrectionCannotStartNextTrajectory()
@@ -592,6 +668,7 @@ namespace
         RobotProtocol::NodeCorrectionReportPayload report;
         assert(executor.correctionReportPending(report));
         assert(report.result == RobotProtocol::NodeCorrectionResult::FAULT);
+
         executor.markCorrectionReportSendResult(true);
         assert(executor.state()
                == PhysicalFleetExecutor::State::FAULT_LATCHED);
@@ -815,6 +892,12 @@ namespace
         RobotProtocol::NodeCorrectionReportPayload report;
         assert(executor.correctionReportPending(report));
         assert(report.result == RobotProtocol::NodeCorrectionResult::FAULT);
+        const size_t estopStarts = g_Fake.starts.size();
+        const auto estopEdge = oneEdgeCommand(41, 2, 3);
+        assert(executor.acceptTrajectory(estopEdge, true, 250)
+               == PhysicalFleetExecutor::AcceptResult::REJECTED_LATCHED);
+        assert(g_Fake.starts.size() == estopStarts);
+        assert(motion.outputsSafe());
 
         resetFake();
         MotionController waitMotion;
@@ -833,6 +916,11 @@ namespace
         assert(waitExecutor.state()
                == PhysicalFleetExecutor::State::FAULT_LATCHED);
         assert(waitMotion.outputsSafe());
+        const size_t cancelStarts = g_Fake.starts.size();
+        const auto afterCancel = oneEdgeCommand(43, 2, 3);
+        assert(waitExecutor.acceptTrajectory(afterCancel, true, 310)
+               == PhysicalFleetExecutor::AcceptResult::REJECTED_LATCHED);
+        assert(g_Fake.starts.size() == cancelStarts);
     }
 
     void testCorrectionCancelAndNetworkLossCannotResumeOrReplay()
@@ -879,6 +967,11 @@ namespace
         networkExecutor.update(500, true);
         assert(g_Fake.starts.size() == startCount);
         assert(!networkExecutor.correctionReportPending(report));
+        const auto afterDisconnect = oneEdgeCommand(47, 2, 3);
+        assert(networkExecutor.acceptTrajectory(afterDisconnect, true, 510)
+               == PhysicalFleetExecutor::AcceptResult::REJECTED_LATCHED);
+        assert(g_Fake.starts.size() == startCount);
+        assert(networkMotion.outputsSafe());
     }
 
     void testFailedReportAttemptIsNotRetried()
@@ -905,6 +998,12 @@ namespace
         assert(executor.state()
                == PhysicalFleetExecutor::State::FAULT_LATCHED);
         assert(!executor.correctionReportPending(report));
+        const size_t startCount = g_Fake.starts.size();
+        const auto afterFailedReport = oneEdgeCommand(51, 2, 3);
+        assert(executor.acceptTrajectory(afterFailedReport, true, 420)
+               == PhysicalFleetExecutor::AcceptResult::REJECTED_LATCHED);
+        assert(g_Fake.starts.size() == startCount);
+        assert(motion.outputsSafe());
     }
 
     void testCorrectionWheelMismatchFreezesTaggedDiagnostic()
@@ -1124,6 +1223,8 @@ int main()
     testRotateDriveFinalRotateSequenceAndNoReportReplay();
     testCorrectionTurnCoastCompensationIsDirectionSpecificAndBounded();
     testCompletedCorrectionSafelyGatesNextTrajectory();
+    testColdIdleCorrectionRequiresCompletedEdgeBinding();
+    testTrajectoryDuringCorrectionRunningOrSettlingLatchesSafeFault();
     testFailedCorrectionCannotStartNextTrajectory();
     testCorrectionBoundsAndIdentity();
     testConflictingDuplicateCannotCreateSecondReport();
