@@ -17,6 +17,8 @@ namespace
     constexpr int kForwardMinPwm = 42;
     constexpr int kForwardMaxPwm = 100;
     constexpr float kForwardSyncKp = 0.25f;
+    constexpr float kForwardSyncKd = 0.50f;
+    constexpr uint32_t kForwardSyncSampleMs = 50;
     constexpr int kForwardSyncCorrectionLimit = 15;
 
     // Correction primitives trade travel time for lower overshoot. Minimum
@@ -381,9 +383,17 @@ MotionController::StartResult MotionController::startMotion(
     m_SettlingStableSinceMs = 0;
     m_LastProgressCheckMs = nowMs;
     m_LastVelocitySampleMs = nowMs;
+    m_LastSyncSampleMs = nowMs;
     m_LastProgressLeft = 0;
     m_LastProgressRight = 0;
     m_LastVelocityAverage = 0;
+    m_LastSyncLeft = 0;
+    m_LastSyncRight = 0;
+    m_LeftIntervalDelta = 0;
+    m_RightIntervalDelta = 0;
+    m_CumulativeSyncError = 0;
+    m_IntervalVelocityError = 0;
+    m_SyncCorrection = 0;
     m_SettlingLastLeft = 0;
     m_SettlingLastRight = 0;
     m_SettlingLastActivitySequence = 0;
@@ -642,9 +652,43 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
     }
 
     const int32_t syncError = leftCount - rightCount;
-    const int correction = clampInt(static_cast<int>(syncError * syncKp),
-                                    -correctionLimit,
-                                    correctionLimit);
+    m_CumulativeSyncError = syncError;
+    if (m_Mode == Mode::FORWARD)
+    {
+        const uint32_t syncElapsedMs = nowMs - m_LastSyncSampleMs;
+        if (syncElapsedMs >= kForwardSyncSampleMs)
+        {
+            m_LeftIntervalDelta = leftCount - m_LastSyncLeft;
+            m_RightIntervalDelta = rightCount - m_LastSyncRight;
+            const int64_t intervalDifference =
+                static_cast<int64_t>(m_LeftIntervalDelta)
+                - static_cast<int64_t>(m_RightIntervalDelta);
+            m_IntervalVelocityError = static_cast<int32_t>(
+                intervalDifference * kForwardSyncSampleMs
+                / static_cast<int64_t>(syncElapsedMs));
+            m_LastSyncLeft = leftCount;
+            m_LastSyncRight = rightCount;
+            m_LastSyncSampleMs = nowMs;
+        }
+    }
+    else
+    {
+        m_LeftIntervalDelta = 0;
+        m_RightIntervalDelta = 0;
+        m_IntervalVelocityError = 0;
+    }
+
+    // PD only: cumulative position error plus the recent wheel-rate error.
+    // There is deliberately no integral state that could wind up while PWM
+    // is clamped during acceleration, deceleration, or per-wheel shutdown.
+    float correctionRequest = syncError * syncKp;
+    if (m_Mode == Mode::FORWARD)
+        correctionRequest += m_IntervalVelocityError * kForwardSyncKd;
+    const int correction = clampInt(
+        static_cast<int>(std::lround(correctionRequest)),
+        -correctionLimit,
+        correctionLimit);
+    m_SyncCorrection = correction;
 
     int leftPwm = baseLeftPwm - correction;
     int rightPwm = baseRightPwm + correction;
@@ -767,6 +811,11 @@ MotionController::Snapshot MotionController::snapshot() const
     result.targetCount = m_TargetCount;
     result.leftTargetCount = m_LeftTargetCount;
     result.rightTargetCount = m_RightTargetCount;
+    result.leftIntervalDelta = m_LeftIntervalDelta;
+    result.rightIntervalDelta = m_RightIntervalDelta;
+    result.cumulativeSyncError = m_CumulativeSyncError;
+    result.intervalVelocityError = m_IntervalVelocityError;
+    result.syncCorrection = m_SyncCorrection;
     result.leftPwm = m_LeftPwm;
     result.rightPwm = m_RightPwm;
     result.velocityCountsPerSecond = m_VelocityCountsPerSecond;

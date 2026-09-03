@@ -132,6 +132,66 @@ namespace
         assert(motion.fault() == MotionController::Fault::WHEEL_MISMATCH);
         assert(motion.outputsSafe());
     }
+
+    void testForwardSyncUsesBoundedCumulativeAndIntervalError()
+    {
+        resetArduino();
+        MotionController motion;
+        motion.begin();
+        assert(motion.startMotion(MotionController::Mode::FORWARD,
+                                  300,
+                                  10,
+                                  MotionController::Profile::PHYSICAL_FLEET)
+               == MotionController::StartResult::STARTED);
+
+        // Right is faster during the first 50 ms window. The controller must
+        // increase left effort and reduce right effort before the final count
+        // target, using both cumulative and interval error.
+        pulseForward(10, 20);
+        assert(motion.update(60) == MotionController::UpdateResult::RUNNING);
+        auto snapshot = motion.snapshot();
+        assert(snapshot.leftIntervalDelta == 10);
+        assert(snapshot.rightIntervalDelta == 20);
+        assert(snapshot.cumulativeSyncError == -10);
+        assert(snapshot.intervalVelocityError == -10);
+        assert(snapshot.syncCorrection == -8);
+        assert(snapshot.leftPwm > snapshot.rightPwm);
+
+        // A large but still non-faulting difference is bounded by the
+        // existing physical-fleet correction limit; outputs remain forward.
+        pulseForward(50, 0);
+        assert(motion.update(110) == MotionController::UpdateResult::RUNNING);
+        snapshot = motion.snapshot();
+        assert(snapshot.syncCorrection == 15);
+        assert(snapshot.leftPwm >= 42);
+        assert(snapshot.rightPwm >= 42);
+        assert(snapshot.leftPwm <= 100);
+        assert(snapshot.rightPwm <= 100);
+        assert(!motion.faultLatched());
+
+        // No correction memory may leak into the next primitive.
+        motion.stopImmediately();
+        assert(motion.startMotion(MotionController::Mode::FORWARD,
+                                  100,
+                                  120,
+                                  MotionController::Profile::CORRECTION)
+               == MotionController::StartResult::STARTED);
+        snapshot = motion.snapshot();
+        assert(snapshot.leftIntervalDelta == 0);
+        assert(snapshot.rightIntervalDelta == 0);
+        assert(snapshot.cumulativeSyncError == 0);
+        assert(snapshot.intervalVelocityError == 0);
+        assert(snapshot.syncCorrection == 0);
+
+        pulseForward(40, 0);
+        assert(motion.update(170) == MotionController::UpdateResult::RUNNING);
+        snapshot = motion.snapshot();
+        assert(snapshot.syncCorrection == 10);
+        assert(snapshot.leftPwm >= 42);
+        assert(snapshot.rightPwm >= 42);
+        assert(snapshot.leftPwm <= 75);
+        assert(snapshot.rightPwm <= 75);
+    }
 }
 
 int main()
@@ -149,5 +209,6 @@ int main()
     testLegacyForwardTargetRemainsUnchanged();
     testCorrectionProfilesStartSlower();
     testWheelMismatchStillLatchesSafeOutputs();
+    testForwardSyncUsesBoundedCumulativeAndIntervalError();
     return 0;
 }

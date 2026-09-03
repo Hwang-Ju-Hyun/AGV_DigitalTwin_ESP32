@@ -156,6 +156,24 @@ PWM feed-forward and encoder synchronization, so it cannot create a commanded
 left/right final-distance difference. Controlled physical repeatability remains
 unverified.
 
+The forward synchronization now combines two measured errors: cumulative
+normalized count error and the left/right count-delta error sampled over at
+least 50 ms and normalized to a 50 ms window. There is no integral term, so no
+integral windup can survive a ramp or motion boundary. The combined request is
+clamped to the existing physical-fleet/correction limits of 15/10 PWM; existing
+minimum/maximum PWM clamps and per-wheel target shutdown prevent reversal or
+driving a completed wheel. This supplements rather than replaces the existing
+wrong-direction, overrun, mismatch, stall, timeout, settling, and output safety
+checks.
+
+The physical-fleet STATUS serial diagnostic now records `rawL/rawR`, normalized
+`L/R` progress and targets, the most recent interval `dL/dR`, cumulative
+`syncErr`, normalized interval `velErr`, last applied `syncCmd` correction, and final
+`PWM L/R`. These are local ESP32 diagnostics; the network STATUS packet and
+protocol remain unchanged. A turn must still complete the de-energized 150 ms
+encoder-stability settling gate, followed by the executor's 500 ms
+`SAFE_PAUSE`, before a following straight primitive can start.
+
 ## Vision node-correction integration (physically exercised; tuning ongoing)
 
 The integration branch adds bounded post-arrival correction primitives to the live physical-fleet profile. A later physical run traversed nodes `6 -> 11 -> 6 -> 7 -> 8 -> 9 -> 10 -> 9 -> 8 -> 7 -> 6`; post-correction position error was generally about 4--33 mm. Pre-correction error was about 23--145 mm and typically required three to six correction primitives per node. The run eventually faulted with `WHEEL_MISMATCH` detail `65539` during a 120 mm correction drive while Vision also transitioned to `POSE_LOST`.
@@ -274,6 +292,14 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 - The forward ISR polarity, acceleration/deceleration values, PWM baseline, and count synchronization were transferred into `MotionController`; the reference file was not moved or rewritten.
 
 ## Build validation
+
+- On 2026-09-03, all five host tests passed after adding bounded forward PD
+  synchronization. Tests cover correction direction, the unchanged 15-PWM
+  physical-fleet limit, minimum/maximum PWM bounds, no correction-state carry
+  into a later primitive, equal targets, the 80-count mismatch safe latch, and
+  the existing turn-settling/500 ms pause transition. All fourteen PlatformIO
+  profiles built successfully without upload. The live physical-fleet build
+  used 47,396 bytes RAM and 785,717 bytes flash.
 
 - On 2026-09-03, all five host tests passed after restoring equal final
   forward targets. The real-controller regression verified that a nominal

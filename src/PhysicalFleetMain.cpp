@@ -269,15 +269,24 @@ namespace
         const MotionController::Snapshot motion = motionController.snapshot();
         Serial.printf(
             "[STATUS] node=%lu target=%lu progress=%.3f state=%s "
-            "L=%ld/%ld R=%ld/%ld PWM=%d/%d STBY=%s\n",
+            "rawL=%ld rawR=%ld L=%ld/%ld R=%ld/%ld "
+            "dL=%ld dR=%ld syncErr=%ld velErr=%ld syncCmd=%d "
+            "PWM=%d/%d STBY=%s\n",
             static_cast<unsigned long>(status.currentNodeID),
             static_cast<unsigned long>(status.currentLinkID),
             status.progress,
             PhysicalFleetExecutor::stateName(fleetExecutor.state()),
+            static_cast<long>(motion.rawLeftCount),
+            static_cast<long>(motion.rawRightCount),
             static_cast<long>(motion.leftProgress),
             static_cast<long>(motion.leftTargetCount),
             static_cast<long>(motion.rightProgress),
             static_cast<long>(motion.rightTargetCount),
+            static_cast<long>(motion.leftIntervalDelta),
+            static_cast<long>(motion.rightIntervalDelta),
+            static_cast<long>(motion.cumulativeSyncError),
+            static_cast<long>(motion.intervalVelocityError),
+            motion.syncCorrection,
             motion.leftPwm,
             motion.rightPwm,
             digitalRead(AppConfig::kMotorStandbyPin) == LOW ? "LOW" : "HIGH");
