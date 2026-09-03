@@ -32,34 +32,36 @@ namespace
             g_ArduinoInterruptHandler[AppConfig::kRightEncoderAPin]();
     }
 
-    void testForwardRightTargetEndsFivePercentEarly()
+    void testPhysicalFleetForwardTargetsRemainEqual()
     {
+        // round(350 mm * 520 counts / 300 mm)
+        constexpr int32_t kNominal350MmTarget = 607;
         resetArduino();
         MotionController motion;
         motion.begin();
         assert(motion.outputsSafe());
         assert(motion.startMotion(
                    MotionController::Mode::FORWARD,
-                   200,
+                   kNominal350MmTarget,
                    10,
                    MotionController::Profile::PHYSICAL_FLEET)
                == MotionController::StartResult::STARTED);
 
         auto snapshot = motion.snapshot();
-        assert(snapshot.leftTargetCount == 205);
-        assert(snapshot.rightTargetCount == 195);
+        assert(snapshot.leftTargetCount == kNominal350MmTarget);
+        assert(snapshot.rightTargetCount == kNominal350MmTarget);
         assert(snapshot.profile
                == MotionController::Profile::PHYSICAL_FLEET);
         assert(snapshot.leftPwm == 50);
         assert(snapshot.rightPwm == 55);
 
-        pulseForward(195, 195);
+        pulseForward(602, 602);
         assert(motion.update(20) == MotionController::UpdateResult::RUNNING);
         snapshot = motion.snapshot();
         assert(snapshot.leftPwm > 0);
-        assert(snapshot.rightPwm == 0);
+        assert(snapshot.rightPwm > 0);
 
-        pulseForward(10, 0);
+        pulseForward(5, 5);
         assert(motion.update(30) == MotionController::UpdateResult::SETTLING);
         assert(motion.outputsSafe());
     }
@@ -91,6 +93,8 @@ namespace
                == MotionController::StartResult::STARTED);
         auto snapshot = drive.snapshot();
         assert(snapshot.profile == MotionController::Profile::CORRECTION);
+        assert(snapshot.leftTargetCount == 100);
+        assert(snapshot.rightTargetCount == 100);
         assert(snapshot.leftPwm == 46);
         assert(snapshot.rightPwm == 51);
         drive.stopImmediately();
@@ -136,12 +140,12 @@ int main()
                   "CW calibration contract changed");
     static_assert(AppConfig::kTurn90CcwCount == 159,
                   "CCW calibration contract changed");
-    static_assert(AppConfig::kForwardLeftTargetScale == 1.025f,
-                  "Forward left trim contract changed");
-    static_assert(AppConfig::kForwardRightTargetScale == 0.975f,
-                  "Forward right trim contract changed");
+    static_assert(AppConfig::kForwardLeftTargetScale == 1.0f,
+                  "Forward left target must remain nominal");
+    static_assert(AppConfig::kForwardRightTargetScale == 1.0f,
+                  "Forward right target must remain nominal");
 
-    testForwardRightTargetEndsFivePercentEarly();
+    testPhysicalFleetForwardTargetsRemainEqual();
     testLegacyForwardTargetRemainsUnchanged();
     testCorrectionProfilesStartSlower();
     testWheelMismatchStillLatchesSafeOutputs();

@@ -146,14 +146,15 @@ tolerance of 10 degrees (`0.174532925` rad) for the command start heading,
 straight LINE alignment, and nominal 90/180-degree rotate-in-place markers.
 Commands beyond that tolerance still latch `INVALID_COMMAND` before motion.
 
-The 2026-09-03 floor-log tuning is deliberately scoped to physical-fleet
-motion. Its provisional values are 163 counts/CW quarter turn, 159 counts/CCW
-quarter turn, and symmetric forward targets of 102.5% left / 97.5% right.
-This preserves the nominal mean distance while making the right target about
-4.9% earlier than the left. The legacy exact-route and isolated straight-calibration profiles keep
-their original equal forward targets. These values were derived from repeated
-over-rotation and leftward-arc observations and still require controlled
-physical repeatability checks.
+The direction-specific turn calibration remains 163 counts/CW quarter turn
+and 159 counts/CCW quarter turn. The provisional 102.5% left / 97.5% right
+forward-target split introduced on 2026-09-03 was removed after later floor
+logs showed straight but diagonally displaced 350 mm paths with roughly
+35--80 mm lateral error. Physical-fleet and correction forward motion now use
+equal nominal encoder targets. Motor asymmetry is handled only by the existing
+PWM feed-forward and encoder synchronization, so it cannot create a commanded
+left/right final-distance difference. Controlled physical repeatability remains
+unverified.
 
 ## Vision node-correction integration (physically exercised; tuning ongoing)
 
@@ -274,6 +275,14 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 ## Build validation
 
+- On 2026-09-03, all five host tests passed after restoring equal final
+  forward targets. The real-controller regression verified that a nominal
+  350 mm physical-fleet move targets `L=607/R=607`, both wheels remain powered
+  at `602/607`, and settling begins only after both reach `607/607`.
+  `esp32dev-physical-fleet-locked` and `esp32dev-physical-fleet` both built
+  successfully without upload; the live build used 47,364 bytes RAM and
+  785,325 bytes flash.
+
 - On 2026-09-03, all five host tests passed after adding the frozen
   `WHEEL_MISMATCH` diagnostic regression (`CORRECTION_DRIVE`, progress
   `L=205/R=117`, targets `L=213/R=203`, legacy detail `65539`, safe outputs).
@@ -331,9 +340,9 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 - Matching the Server's requested 80 mm/s; Phase 2F currently uses the existing empirical PWM profile rather than closed-loop metric speed control
 - Recovery/relocalization after a mid-edge stop or reboot, and accepted-but-half-open TCP detection
 - Physical 50 mm/map-unit calibration; Bezier execution remains intentionally excluded
-- Repeatability of the provisional 163-count CW, 159-count CCW, symmetric
-  102.5%/97.5% forward-wheel
-  target, and correction-only lower-speed PWM values on the physical chassis
+- Repeatability of the provisional 163-count CW, 159-count CCW, equal
+  forward-wheel targets, and correction-only lower-speed PWM values on the
+  physical chassis
 
 ## Next safe step
 

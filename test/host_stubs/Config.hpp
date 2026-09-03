@@ -7,8 +7,8 @@ namespace AppConfig
     static constexpr uint32_t kPrimitiveSafePauseMs = 500;
     static constexpr float kPhysicalFleetScaleMmPerMapUnit = 50.0f;
     static constexpr float kForwardCountsPerMm = 520.0f / 300.0f;
-    static constexpr float kForwardLeftTargetScale = 1.025f;
-    static constexpr float kForwardRightTargetScale = 0.975f;
+    static constexpr float kForwardLeftTargetScale = 1.0f;
+    static constexpr float kForwardRightTargetScale = 1.0f;
     static constexpr int32_t kTurn90CwCount = 163;
     static constexpr int32_t kTurn90CcwCount = 159;
     static constexpr float kTurnCwCountsPerRadian =

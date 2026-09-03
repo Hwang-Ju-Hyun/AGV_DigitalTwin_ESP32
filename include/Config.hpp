@@ -134,11 +134,10 @@ namespace AppConfig
     static constexpr float kPhysicalFleetScaleMmPerMapUnit = 50.0f;
     static constexpr float kPhysicalFleetCruiseSpeedMmPerSecond = 80.0f;
     static constexpr float kForwardCountsPerMm = 520.0f / 300.0f;
-    // Provisional floor-log calibration. Forward distance stays on the
-    // verified nominal mean distance; a symmetric 5% target split counters
-    // the repeatable leftward arc seen on 350 mm edges.
-    static constexpr float kForwardLeftTargetScale = 1.025f;
-    static constexpr float kForwardRightTargetScale = 0.975f;
+    // Both wheels must travel the same final distance. Straight-line trim is
+    // handled only by the existing PWM feed-forward/synchronization path.
+    static constexpr float kForwardLeftTargetScale = 1.0f;
+    static constexpr float kForwardRightTargetScale = 1.0f;
     // Direction-specific 90-degree targets compensate the measured
     // over-rotation of the former shared 176-count target.
     static constexpr int32_t kTurn90CwCount = 163;

@@ -812,8 +812,8 @@ namespace
         // unchanged controller mismatch limit.
         g_Fake.leftProgress = 205;
         g_Fake.rightProgress = 117;
-        g_Fake.leftTarget = 213;
-        g_Fake.rightTarget = 203;
+        g_Fake.leftTarget = 208;
+        g_Fake.rightTarget = 208;
         g_Fake.injectedFault = MotionController::Fault::WHEEL_MISMATCH;
         g_Fake.updateResult = MotionController::UpdateResult::FAULTED;
         executor.update(510, true);
@@ -835,8 +835,8 @@ namespace
                == MotionController::Profile::CORRECTION);
         assert(diagnostic.leftProgress == 205);
         assert(diagnostic.rightProgress == 117);
-        assert(diagnostic.leftTarget == 213);
-        assert(diagnostic.rightTarget == 203);
+        assert(diagnostic.leftTarget == 208);
+        assert(diagnostic.rightTarget == 208);
 
         assert(RobotProtocol::encodeMotorFaultDiagnosticContext(
                    static_cast<uint8_t>(diagnostic.operation),
@@ -854,11 +854,11 @@ namespace
         assert(RobotProtocol::encodeMotorFaultDiagnosticValue(
                    RobotProtocol::MotorFaultDiagnosticTag::LEFT_TARGET,
                    diagnostic.leftTarget)
-               == 0xD30000D5UL);
+               == 0xD30000D0UL);
         assert(RobotProtocol::encodeMotorFaultDiagnosticValue(
                    RobotProtocol::MotorFaultDiagnosticTag::RIGHT_TARGET,
                    diagnostic.rightTarget)
-               == 0xD40000CBUL);
+               == 0xD40000D0UL);
     }
 }
 
