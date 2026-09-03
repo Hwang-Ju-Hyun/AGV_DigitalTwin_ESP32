@@ -434,9 +434,7 @@ namespace
         assert(executor.acceptNodeCorrection(firstTurn, true, 100)
                == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
         assert(g_Fake.starts.back().mode == MotionController::Mode::TURN_CW);
-        assert(g_Fake.starts.back().targetCount
-               == static_cast<int32_t>(std::lround(
-                   0.2f * AppConfig::kTurnCwCountsPerRadian)));
+        assert(g_Fake.starts.back().targetCount == 9);
         assert(g_Fake.starts.back().profile
                == MotionController::Profile::CORRECTION);
         auto report = completeCorrection(executor, 110);
@@ -461,9 +459,7 @@ namespace
         assert(executor.acceptNodeCorrection(finalTurn, true, 140)
                == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
         assert(g_Fake.starts.back().mode == MotionController::Mode::TURN_CCW);
-        assert(g_Fake.starts.back().targetCount
-               == static_cast<int32_t>(std::lround(
-                   0.2f * AppConfig::kTurnCcwCountsPerRadian)));
+        assert(g_Fake.starts.back().targetCount == 8);
         assert(g_Fake.starts.back().profile
                == MotionController::Profile::CORRECTION);
         report = completeCorrection(executor, 150);
@@ -485,6 +481,126 @@ namespace
                       DUPLICATE_IGNORED);
         assert(executor.state() == PhysicalFleetExecutor::State::READY);
         assert(g_Fake.starts.size() == completedStarts);
+    }
+
+    void testCorrectionTurnCoastCompensationIsDirectionSpecificAndBounded()
+    {
+        resetFake();
+        MotionController motion;
+        PhysicalFleetExecutor executor(motion);
+        executor.begin(1, 0.0f);
+        enterNodeWait(executor, 12, 1, 2);
+
+        auto turn = correction(
+            12, 2, 1, RobotProtocol::NodeCorrectionAction::TURN_CW,
+            radians(72.22f));
+        assert(executor.acceptNodeCorrection(turn, true, 100)
+               == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
+        // nominal round(72.22 / 90 * 163) = 131, less 14 measured coast.
+        assert(g_Fake.starts.back().targetCount == 117);
+        completeCorrection(executor, 110);
+
+        turn = correction(
+            12, 2, 2, RobotProtocol::NodeCorrectionAction::TURN_CCW,
+            radians(42.35f));
+        assert(executor.acceptNodeCorrection(turn, true, 120)
+               == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
+        // nominal 75, less the direction-specific 12-count coast.
+        assert(g_Fake.starts.back().targetCount == 63);
+        completeCorrection(executor, 130);
+
+        turn = correction(
+            12, 2, 3, RobotProtocol::NodeCorrectionAction::TURN_CCW,
+            radians(11.78f));
+        assert(executor.acceptNodeCorrection(turn, true, 140)
+               == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
+        // The smallest measured sample supports the full 12-count offset.
+        assert(g_Fake.starts.back().targetCount == 9);
+        completeCorrection(executor, 150);
+
+        turn = correction(
+            12, 2, 4, RobotProtocol::NodeCorrectionAction::TURN_CW,
+            AppConfig::kCorrectionMinimumTurnRad);
+        assert(executor.acceptNodeCorrection(turn, true, 160)
+               == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
+        // A 5-degree nominal target is 9 counts. The 60% bound prevents the
+        // fixed 14-count estimate from collapsing or reversing the command.
+        assert(g_Fake.starts.back().targetCount == 4);
+        assert(g_Fake.starts.back().mode == MotionController::Mode::TURN_CW);
+        assert(g_Fake.starts.back().profile
+               == MotionController::Profile::CORRECTION);
+    }
+
+    void testCompletedCorrectionSafelyGatesNextTrajectory()
+    {
+        resetFake();
+        MotionController motion;
+        PhysicalFleetExecutor executor(motion);
+        executor.begin(1, 0.0f);
+        enterNodeWait(executor, 13, 1, 2);
+
+        const auto turn = correction(
+            13, 2, 1, RobotProtocol::NodeCorrectionAction::TURN_CCW,
+            radians(20.0f));
+        assert(executor.acceptNodeCorrection(turn, true, 100)
+               == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
+        const size_t correctionStarts = g_Fake.starts.size();
+        completeCurrentMotion(executor, 110);
+
+        RobotProtocol::NodeCorrectionReportPayload report;
+        assert(executor.correctionReportPending(report));
+        assert(executor.state()
+               == PhysicalFleetExecutor::State::CORRECTION_REPORT_PENDING);
+        assert(motion.outputsSafe());
+        assert(g_Fake.starts.size() == correctionStarts);
+
+        executor.markCorrectionReportSendResult(true);
+        assert(executor.state() == PhysicalFleetExecutor::State::NODE_WAIT);
+        assert(motion.outputsSafe());
+
+        const auto nextEdge = oneEdgeCommand(14, 2, 3);
+        assert(executor.acceptTrajectory(nextEdge, true, 120)
+               == PhysicalFleetExecutor::AcceptResult::STORED);
+        assert(motion.outputsSafe());
+        assert(g_Fake.starts.size() == correctionStarts);
+        executor.update(120, true);
+        assert(g_Fake.starts.size() == correctionStarts + 1);
+        assert(g_Fake.starts.back().mode == MotionController::Mode::FORWARD);
+    }
+
+    void testFailedCorrectionCannotStartNextTrajectory()
+    {
+        resetFake();
+        MotionController motion;
+        PhysicalFleetExecutor executor(motion);
+        executor.begin(1, 0.0f);
+        enterNodeWait(executor, 15, 1, 2);
+
+        const auto turn = correction(
+            15, 2, 1, RobotProtocol::NodeCorrectionAction::TURN_CW,
+            radians(20.0f));
+        assert(executor.acceptNodeCorrection(turn, true, 100)
+               == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED);
+        const size_t startCount = g_Fake.starts.size();
+        g_Fake.injectedFault = MotionController::Fault::STALL;
+        g_Fake.updateResult = MotionController::UpdateResult::FAULTED;
+        executor.update(110, true);
+        assert(executor.state()
+               == PhysicalFleetExecutor::State::FAULT_LATCHED);
+        assert(motion.outputsSafe());
+
+        RobotProtocol::NodeCorrectionReportPayload report;
+        assert(executor.correctionReportPending(report));
+        assert(report.result == RobotProtocol::NodeCorrectionResult::FAULT);
+        executor.markCorrectionReportSendResult(true);
+        assert(executor.state()
+               == PhysicalFleetExecutor::State::FAULT_LATCHED);
+
+        const auto nextEdge = oneEdgeCommand(16, 2, 3);
+        assert(executor.acceptTrajectory(nextEdge, true, 120)
+               == PhysicalFleetExecutor::AcceptResult::REJECTED_LATCHED);
+        assert(g_Fake.starts.size() == startCount);
+        assert(motion.outputsSafe());
     }
 
     void testCorrectionBoundsAndIdentity()
@@ -1006,6 +1122,9 @@ int main()
     testOneEdgeMayContainRotationMarker();
     testClockwiseOneEdgeUsesDirectionSpecificTarget();
     testRotateDriveFinalRotateSequenceAndNoReportReplay();
+    testCorrectionTurnCoastCompensationIsDirectionSpecificAndBounded();
+    testCompletedCorrectionSafelyGatesNextTrajectory();
+    testFailedCorrectionCannotStartNextTrajectory();
     testCorrectionBoundsAndIdentity();
     testConflictingDuplicateCannotCreateSecondReport();
     testEightPrimitiveRecoveryBudgetAndNinthRejection();

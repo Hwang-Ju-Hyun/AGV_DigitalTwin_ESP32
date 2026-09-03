@@ -220,6 +220,21 @@ namespace
                 static_cast<unsigned>(correction.action),
                 correction.magnitude,
                 PhysicalFleetExecutor::correctionAcceptResultName(result));
+            if (result
+                == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED)
+            {
+                const MotionController::Snapshot motion =
+                    motionController.snapshot();
+                Serial.printf(
+                    "[CORRECTION_START] commandID=%lu action=%u mode=%u "
+                    "magnitude=%.5f targetL=%ld targetR=%ld\n",
+                    static_cast<unsigned long>(correction.commandID),
+                    static_cast<unsigned>(correction.action),
+                    static_cast<unsigned>(motion.mode),
+                    correction.magnitude,
+                    static_cast<long>(motion.leftTargetCount),
+                    static_cast<long>(motion.rightTargetCount));
+            }
         };
 
         robotClient.onCancelRoute = []()
@@ -307,6 +322,7 @@ namespace
         // next edge dispatch.
         const bool statusSent = robotClient.sendStatus(
             fleetExecutor.buildStatus());
+        const MotionController::Snapshot motion = motionController.snapshot();
         const bool sent = statusSent &&
             robotClient.sendNodeCorrectionReport(report);
         fleetExecutor.markCorrectionReportSendResult(sent);
@@ -320,6 +336,24 @@ namespace
                 static_cast<unsigned long>(report.commandID),
                 static_cast<unsigned>(report.result),
                 static_cast<unsigned long>(report.detail));
+            if (report.result
+                == RobotProtocol::NodeCorrectionResult::COMPLETED)
+            {
+                Serial.printf(
+                    "[CORRECTION_END] commandID=%lu mode=%u "
+                    "rawL=%ld rawR=%ld L=%ld/%ld R=%ld/%ld "
+                    "elapsedMs=%lu settled=%s\n",
+                    static_cast<unsigned long>(report.commandID),
+                    static_cast<unsigned>(motion.mode),
+                    static_cast<long>(motion.rawLeftCount),
+                    static_cast<long>(motion.rawRightCount),
+                    static_cast<long>(motion.leftProgress),
+                    static_cast<long>(motion.leftTargetCount),
+                    static_cast<long>(motion.rightProgress),
+                    static_cast<long>(motion.rightTargetCount),
+                    static_cast<unsigned long>(motion.elapsedMs),
+                    motion.completed && motion.outputsSafe ? "YES" : "NO");
+            }
         }
     }
 

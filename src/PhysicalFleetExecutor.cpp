@@ -65,6 +65,25 @@ namespace
             ? AppConfig::kTurnCwCountsPerRadian
             : AppConfig::kTurnCcwCountsPerRadian;
     }
+
+    int32_t correctionTurnTargetCounts(MotionController::Mode mode,
+                                       float magnitudeRad)
+    {
+        const int32_t nominalCounts = static_cast<int32_t>(std::lround(
+            magnitudeRad * turnCountsPerRadian(mode)));
+        const int32_t measuredCoastCounts =
+            mode == MotionController::Mode::TURN_CW
+                ? AppConfig::kCorrectionTurnCwCoastCounts
+                : AppConfig::kCorrectionTurnCcwCoastCounts;
+        const int32_t boundedCoastCounts = static_cast<int32_t>(std::floor(
+            static_cast<float>(nominalCounts)
+            * AppConfig::kCorrectionTurnMaximumCoastRatio));
+        const int32_t appliedCoastCounts =
+            measuredCoastCounts < boundedCoastCounts
+                ? measuredCoastCounts : boundedCoastCounts;
+        const int32_t compensatedCounts = nominalCounts - appliedCoastCounts;
+        return compensatedCounts > 0 ? compensatedCounts : 1;
+    }
 }
 
 PhysicalFleetExecutor::PhysicalFleetExecutor(MotionController& motion)
@@ -310,8 +329,7 @@ PhysicalFleetExecutor::acceptNodeCorrection(
                          : MotionController::Mode::TURN_CCW;
         m_ActiveCorrectionHeadingDeltaRad = clockwise
             ? -command.magnitude : command.magnitude;
-        targetCounts = static_cast<int32_t>(std::lround(
-            command.magnitude * turnCountsPerRadian(mode)));
+        targetCounts = correctionTurnTargetCounts(mode, command.magnitude);
     }
     m_MotionMode = mode;
 

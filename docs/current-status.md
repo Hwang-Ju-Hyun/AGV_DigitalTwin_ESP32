@@ -248,7 +248,7 @@ The active PlatformIO firmware is now split into these responsibilities:
 
 - `src/RobotProtocol.cpp`: RobotProtocol v1 field-by-field serialization.
 - `src/RobotClient.cpp`: Wi-Fi/TCP session, HELLO/ACK, packet handling, STATUS, ARRIVED, ERROR, and PING/PONG.
-- `src/MotionController.cpp`: encoder interrupts, the verified legacy 30 cm forward profile, physical-fleet-only wheel-target trim, correction-only low-speed profiles, synchronization, immediate motion safety, and encoder-stability settling.
+- `src/MotionController.cpp`: encoder interrupts, the verified legacy 30 cm forward profile, equal-target physical-fleet forward control, correction-only low-speed profiles, bounded synchronization, immediate motion safety, and encoder-stability settling.
 - `src/RouteExecutor.cpp`: exact-route validation, BOOT/countdown/E-stop gating, running/settling state, fault latch, progress STATUS, and ARRIVED gating.
 - `src/EncoderOdometry.cpp`: preview-only robot-local differential-drive odometry using an atomic encoder reset epoch.
 - `src/TrajectoryCommandStore.cpp`: non-driving trajectory validation, duplicate handling, and bounded storage.
@@ -318,6 +318,20 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 - The forward ISR polarity, acceleration/deceleration values, PWM baseline, and count synchronization were transferred into `MotionController`; the reference file was not moved or rewritten.
 
 ## Build validation
+
+- On 2026-09-03, correction-turn Vision samples showed a nearly fixed stop
+  overshoot rather than a proportional angle-scale error: about 14 encoder
+  counts CW and 12 counts CCW across requests from 11.78 through 73.93
+  degrees. Physical-fleet correction turns now subtract those direction-
+  specific coast estimates from the encoder cutoff only, bounded to at most
+  60% of a small command. Normal trajectory quarter-turn calibration remains
+  unchanged at 163 CW / 159 CCW counts. Correlated serial start/end summaries
+  add requested magnitude, target, raw/normalized settled counts, elapsed
+  time, and safe-settled state; successful encoder summaries are not available
+  to the Server without a protocol extension. All five host tests passed, and
+  the physical-fleet locked/live plus turn-calibration locked/CW/CCW profiles
+  all built successfully without upload. The live physical-fleet build used
+  47,396 bytes RAM and 786,581 bytes flash.
 
 - On 2026-09-03, all five host tests passed after the post-`5c2d1c0` drift
   analysis. Regressions verify the 572/572 target for 350 mm, equal

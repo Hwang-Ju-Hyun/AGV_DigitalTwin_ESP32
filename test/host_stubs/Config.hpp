@@ -17,6 +17,9 @@ namespace AppConfig
     static constexpr float kTurnCcwCountsPerRadian =
         static_cast<float>(kTurn90CcwCount)
         / 1.57079632679489661923f;
+    static constexpr int32_t kCorrectionTurnCwCoastCounts = 14;
+    static constexpr int32_t kCorrectionTurnCcwCoastCounts = 12;
+    static constexpr float kCorrectionTurnMaximumCoastRatio = 0.60f;
     static constexpr float kCorrectionMinimumDriveMm = 20.0f;
     static constexpr float kCorrectionMaximumDriveMm = 120.0f;
     static constexpr float kCorrectionMinimumTurnRad =
