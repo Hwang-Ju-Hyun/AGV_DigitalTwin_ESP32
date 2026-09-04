@@ -398,7 +398,10 @@ MotionController::StartResult MotionController::startMotion(
     m_SyncCorrection = 0;
     m_SettlingLastLeft = 0;
     m_SettlingLastRight = 0;
+    m_SettlingStartLeft = 0;
+    m_SettlingStartRight = 0;
     m_SettlingLastActivitySequence = 0;
+    m_HasSettlingBaseline = false;
     m_LeftNoProgressWindows = 0;
     m_RightNoProgressWindows = 0;
     m_VelocityCountsPerSecond = 0.0f;
@@ -509,7 +512,10 @@ MotionController::UpdateResult MotionController::update(uint32_t nowMs)
         m_SettlingStableSinceMs = nowMs;
         m_SettlingLastLeft = leftCount;
         m_SettlingLastRight = rightCount;
+        m_SettlingStartLeft = leftCount;
+        m_SettlingStartRight = rightCount;
         m_SettlingLastActivitySequence = activitySequence;
+        m_HasSettlingBaseline = true;
         m_State = State::SETTLING;
         return updateSettling(nowMs);
     }
@@ -835,6 +841,11 @@ MotionController::Snapshot MotionController::snapshot() const
     result.rightIntervalDelta = m_RightIntervalDelta;
     result.cumulativeSyncError = m_CumulativeSyncError;
     result.intervalVelocityError = m_IntervalVelocityError;
+    if (m_HasSettlingBaseline)
+    {
+        result.leftCoastCount = result.leftProgress - m_SettlingStartLeft;
+        result.rightCoastCount = result.rightProgress - m_SettlingStartRight;
+    }
     result.syncCorrection = m_SyncCorrection;
     result.leftPwm = m_LeftPwm;
     result.rightPwm = m_RightPwm;

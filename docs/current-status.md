@@ -319,6 +319,30 @@ This temporary mapping is not a general conversion from arbitrary Server map rou
 
 ## Build validation
 
+- On 2026-09-04, Server log `/tmp/agv_34abef1_068cdf_run1.log` was
+  correlated by command before further motor tuning. Nominal 90-degree
+  correction turns ranged from about 84.4 to 98.7 degrees while their Vision
+  reference point moved about 17 to 24 mm; the direction and magnitude were
+  not stable enough to justify another CW/CCW count or PWM constant. Straight
+  lateral error was likewise not a stable one-wheel bias, and that Server log
+  contains no raw encoder/PWM samples. Consequently the calibrated 572/350
+  forward ratio, equal forward targets/PWM, bounded PD synchronization, turn
+  counts, and correction coast constants remain unchanged.
+
+- Command-correlated serial evidence now records LINE and NODE_CORRECTION
+  start/end raw and normalized encoder counts, targets, interval deltas,
+  synchronization terms, applied/final PWM, elapsed time, and per-wheel coast
+  measured strictly after PWM is forced to zero for settling. Trajectory
+  packets have a route ID but no command ID, so their diagnostic explicitly
+  says `commandID=NA`; correction logs preserve the actual command ID and
+  action. These fields are diagnostic-only and are not added to the wire
+  protocol, so collection by the Server still requires a separately designed
+  canonical protocol extension. All five host tests passed, including both
+  forward synchronization signs, wrong-direction/mismatch/timeout latches,
+  measured settling coast, and completed-output safety. All fourteen
+  PlatformIO environments built successfully without upload; the live fleet
+  image used 47,420 bytes RAM and 788,241 bytes flash.
+
 - The pre-departure correction handoff is explicitly regression-tested as
   `CORRECTION_RUNNING -> CORRECTION_SETTLING -> CORRECTION_REPORT_PENDING ->
   NODE_WAIT -> READY -> RUNNING`. The completed correction heading remains in

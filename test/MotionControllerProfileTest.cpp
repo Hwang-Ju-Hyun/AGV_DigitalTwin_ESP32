@@ -32,6 +32,16 @@ namespace
             g_ArduinoInterruptHandler[AppConfig::kRightEncoderAPin]();
     }
 
+    void pulseWrongDirection(int leftPulses, int rightPulses)
+    {
+        digitalWrite(AppConfig::kLeftEncoderBPin, HIGH);
+        digitalWrite(AppConfig::kRightEncoderBPin, LOW);
+        for (int i = 0; i < leftPulses; ++i)
+            g_ArduinoInterruptHandler[AppConfig::kLeftEncoderAPin]();
+        for (int i = 0; i < rightPulses; ++i)
+            g_ArduinoInterruptHandler[AppConfig::kRightEncoderAPin]();
+    }
+
     void testPhysicalFleetForwardTargetsRemainEqual()
     {
         constexpr int32_t kNominal350MmTarget = 572;
@@ -216,6 +226,81 @@ namespace
         assert(snapshot.syncCorrection == -1);
         assert(snapshot.leftPwm > snapshot.rightPwm);
     }
+
+    void testForwardSyncCorrectionSignForLeftLead()
+    {
+        resetArduino();
+        MotionController motion;
+        motion.begin();
+        assert(motion.startMotion(MotionController::Mode::FORWARD,
+                                  300,
+                                  10,
+                                  MotionController::Profile::PHYSICAL_FLEET)
+               == MotionController::StartResult::STARTED);
+        pulseForward(20, 10);
+        assert(motion.update(60) == MotionController::UpdateResult::RUNNING);
+        const auto snapshot = motion.snapshot();
+        assert(snapshot.cumulativeSyncError == 10);
+        assert(snapshot.intervalVelocityError == 10);
+        assert(snapshot.syncCorrection == 8);
+        assert(snapshot.leftPwm < snapshot.rightPwm);
+    }
+
+    void testWrongDirectionAndTimeoutRemainLatchedSafe()
+    {
+        resetArduino();
+        MotionController wrongDirection;
+        wrongDirection.begin();
+        assert(wrongDirection.startForward(200, 10)
+               == MotionController::StartResult::STARTED);
+        pulseWrongDirection(11, 0);
+        assert(wrongDirection.update(20)
+               == MotionController::UpdateResult::FAULTED);
+        assert(wrongDirection.fault()
+               == MotionController::Fault::WRONG_DIRECTION);
+        assert(wrongDirection.outputsSafe());
+
+        resetArduino();
+        MotionController timeout;
+        timeout.begin();
+        assert(timeout.startForward(200, 10)
+               == MotionController::StartResult::STARTED);
+        assert(timeout.update(10010)
+               == MotionController::UpdateResult::FAULTED);
+        assert(timeout.fault() == MotionController::Fault::TIMEOUT);
+        assert(timeout.outputsSafe());
+    }
+
+    void testSettlingCoastAndCompletedOutputInvariant()
+    {
+        resetArduino();
+        MotionController motion;
+        motion.begin();
+        assert(motion.startMotion(MotionController::Mode::FORWARD,
+                                  20,
+                                  10,
+                                  MotionController::Profile::PHYSICAL_FLEET)
+               == MotionController::StartResult::STARTED);
+        pulseForward(20, 20);
+        assert(motion.update(20) == MotionController::UpdateResult::SETTLING);
+        assert(motion.outputsSafe());
+
+        pulseForward(3, 4);
+        assert(motion.update(30) == MotionController::UpdateResult::SETTLING);
+        auto snapshot = motion.snapshot();
+        assert(snapshot.leftCoastCount == 3);
+        assert(snapshot.rightCoastCount == 4);
+        assert(snapshot.leftPwm == 0);
+        assert(snapshot.rightPwm == 0);
+        assert(snapshot.outputsSafe);
+
+        g_ArduinoMillis = 180;
+        assert(motion.update(180) == MotionController::UpdateResult::COMPLETE);
+        assert(motion.completed());
+        assert(motion.outputsSafe());
+        assert(motion.update(181) == MotionController::UpdateResult::COMPLETE);
+        assert(motion.outputsSafe());
+    }
 }
 
 int main()
@@ -235,5 +320,8 @@ int main()
     testWheelMismatchStillLatchesSafeOutputs();
     testForwardSyncUsesBoundedCumulativeAndIntervalError();
     testForwardIntervalNormalizationDoesNotTruncateOneCount();
+    testForwardSyncCorrectionSignForLeftLead();
+    testWrongDirectionAndTimeoutRemainLatchedSafe();
+    testSettlingCoastAndCompletedOutputInvariant();
     return 0;
 }

@@ -42,6 +42,18 @@ namespace
     PhysicalFleetExecutor::State lastExecutorState =
         PhysicalFleetExecutor::State::IDLE;
 
+    struct CorrectionLogContext
+    {
+        uint32_t routeID = 0;
+        uint32_t nodeID = 0;
+        uint32_t commandID = 0;
+        RobotProtocol::NodeCorrectionAction action =
+            RobotProtocol::NodeCorrectionAction::DRIVE_FORWARD;
+        float magnitude = 0.0f;
+        bool valid = false;
+    };
+    CorrectionLogContext correctionLogContext;
+
     bool lastButtonReading = HIGH;
     bool stableButtonState = HIGH;
     bool buttonArmed = true;
@@ -223,17 +235,33 @@ namespace
             if (result
                 == PhysicalFleetExecutor::CorrectionAcceptResult::STARTED)
             {
+                correctionLogContext.routeID = correction.routeID;
+                correctionLogContext.nodeID = correction.nodeID;
+                correctionLogContext.commandID = correction.commandID;
+                correctionLogContext.action = correction.action;
+                correctionLogContext.magnitude = correction.magnitude;
+                correctionLogContext.valid = true;
                 const MotionController::Snapshot motion =
                     motionController.snapshot();
                 Serial.printf(
-                    "[CORRECTION_START] commandID=%lu action=%u mode=%u "
-                    "magnitude=%.5f targetL=%ld targetR=%ld\n",
+                    "[CORRECTION_START] routeID=%lu node=%lu commandID=%lu "
+                    "action=%u mode=%u magnitude=%.5f "
+                    "rawL=%ld rawR=%ld L=%ld/%ld R=%ld/%ld "
+                    "PWM=%d/%d\n",
+                    static_cast<unsigned long>(correction.routeID),
+                    static_cast<unsigned long>(correction.nodeID),
                     static_cast<unsigned long>(correction.commandID),
                     static_cast<unsigned>(correction.action),
                     static_cast<unsigned>(motion.mode),
                     correction.magnitude,
+                    static_cast<long>(motion.rawLeftCount),
+                    static_cast<long>(motion.rawRightCount),
+                    static_cast<long>(motion.leftProgress),
                     static_cast<long>(motion.leftTargetCount),
-                    static_cast<long>(motion.rightTargetCount));
+                    static_cast<long>(motion.rightProgress),
+                    static_cast<long>(motion.rightTargetCount),
+                    motion.leftPwm,
+                    motion.rightPwm);
             }
         };
 
@@ -339,11 +367,23 @@ namespace
             if (report.result
                 == RobotProtocol::NodeCorrectionResult::COMPLETED)
             {
+                const bool contextMatches = correctionLogContext.valid
+                    && correctionLogContext.commandID == report.commandID
+                    && correctionLogContext.routeID == report.routeID
+                    && correctionLogContext.nodeID == report.nodeID;
                 Serial.printf(
-                    "[CORRECTION_END] commandID=%lu mode=%u "
+                    "[CORRECTION_END] routeID=%lu node=%lu commandID=%lu "
+                    "action=%d magnitude=%.5f mode=%u "
                     "rawL=%ld rawR=%ld L=%ld/%ld R=%ld/%ld "
+                    "dL=%ld dR=%ld syncErr=%ld velErr=%ld syncCmd=%d "
+                    "PWM=%d/%d coastL=%ld coastR=%ld "
                     "elapsedMs=%lu settled=%s\n",
+                    static_cast<unsigned long>(report.routeID),
+                    static_cast<unsigned long>(report.nodeID),
                     static_cast<unsigned long>(report.commandID),
+                    contextMatches
+                        ? static_cast<int>(correctionLogContext.action) : -1,
+                    contextMatches ? correctionLogContext.magnitude : 0.0f,
                     static_cast<unsigned>(motion.mode),
                     static_cast<long>(motion.rawLeftCount),
                     static_cast<long>(motion.rawRightCount),
@@ -351,8 +391,22 @@ namespace
                     static_cast<long>(motion.leftTargetCount),
                     static_cast<long>(motion.rightProgress),
                     static_cast<long>(motion.rightTargetCount),
+                    static_cast<long>(motion.leftIntervalDelta),
+                    static_cast<long>(motion.rightIntervalDelta),
+                    static_cast<long>(motion.cumulativeSyncError),
+                    static_cast<long>(motion.intervalVelocityError),
+                    motion.syncCorrection,
+                    motion.leftPwm,
+                    motion.rightPwm,
+                    static_cast<long>(motion.leftCoastCount),
+                    static_cast<long>(motion.rightCoastCount),
                     static_cast<unsigned long>(motion.elapsedMs),
                     motion.completed && motion.outputsSafe ? "YES" : "NO");
+            }
+            if (correctionLogContext.valid
+                && correctionLogContext.commandID == report.commandID)
+            {
+                correctionLogContext.valid = false;
             }
         }
     }
@@ -435,23 +489,76 @@ namespace
             motion.profile == MotionController::Profile::PHYSICAL_FLEET
             && (motion.mode == MotionController::Mode::TURN_CW
                 || motion.mode == MotionController::Mode::TURN_CCW);
+        const bool trajectoryDrive =
+            motion.profile == MotionController::Profile::PHYSICAL_FLEET
+            && motion.mode == MotionController::Mode::FORWARD;
+        if (state == PhysicalFleetExecutor::State::RUNNING && trajectoryDrive)
+        {
+            Serial.printf(
+                "[LINE_START] routeID=%lu commandID=NA action=DRIVE_FORWARD "
+                "wp=%u rawL=%ld rawR=%ld L=%ld/%ld R=%ld/%ld "
+                "PWM=%d/%d\n",
+                static_cast<unsigned long>(fleetExecutor.routeID()),
+                fleetExecutor.waypointIndex(),
+                static_cast<long>(motion.rawLeftCount),
+                static_cast<long>(motion.rawRightCount),
+                static_cast<long>(motion.leftProgress),
+                static_cast<long>(motion.leftTargetCount),
+                static_cast<long>(motion.rightProgress),
+                static_cast<long>(motion.rightTargetCount),
+                motion.leftPwm,
+                motion.rightPwm);
+        }
+        else if (state == PhysicalFleetExecutor::State::ARRIVAL_PENDING
+                 && trajectoryDrive)
+        {
+            Serial.printf(
+                "[LINE_END] routeID=%lu commandID=NA action=DRIVE_FORWARD "
+                "wp=%u rawL=%ld rawR=%ld L=%ld/%ld R=%ld/%ld "
+                "dL=%ld dR=%ld syncErr=%ld velErr=%ld syncCmd=%d "
+                "PWM=%d/%d coastL=%ld coastR=%ld "
+                "elapsedMs=%lu safe=%u\n",
+                static_cast<unsigned long>(fleetExecutor.routeID()),
+                fleetExecutor.waypointIndex(),
+                static_cast<long>(motion.rawLeftCount),
+                static_cast<long>(motion.rawRightCount),
+                static_cast<long>(motion.leftProgress),
+                static_cast<long>(motion.leftTargetCount),
+                static_cast<long>(motion.rightProgress),
+                static_cast<long>(motion.rightTargetCount),
+                static_cast<long>(motion.leftIntervalDelta),
+                static_cast<long>(motion.rightIntervalDelta),
+                static_cast<long>(motion.cumulativeSyncError),
+                static_cast<long>(motion.intervalVelocityError),
+                motion.syncCorrection,
+                motion.leftPwm,
+                motion.rightPwm,
+                static_cast<long>(motion.leftCoastCount),
+                static_cast<long>(motion.rightCoastCount),
+                static_cast<unsigned long>(motion.elapsedMs),
+                motion.outputsSafe ? 1U : 0U);
+        }
         if (state == PhysicalFleetExecutor::State::RUNNING && trajectoryTurn)
         {
             Serial.printf(
-                "[TRAJECTORY_TURN_START] wp=%u mode=%u "
-                "targetL=%ld targetR=%ld\n",
+                "[TRAJECTORY_TURN_START] routeID=%lu commandID=NA wp=%u "
+                "mode=%u targetL=%ld targetR=%ld PWM=%d/%d\n",
+                static_cast<unsigned long>(fleetExecutor.routeID()),
                 fleetExecutor.waypointIndex(),
                 static_cast<unsigned>(motion.mode),
                 static_cast<long>(motion.leftTargetCount),
-                static_cast<long>(motion.rightTargetCount));
+                static_cast<long>(motion.rightTargetCount),
+                motion.leftPwm,
+                motion.rightPwm);
         }
         else if (state == PhysicalFleetExecutor::State::SAFE_PAUSE
                  && trajectoryTurn)
         {
             Serial.printf(
-                "[TRAJECTORY_TURN_END] wp=%u mode=%u "
+                "[TRAJECTORY_TURN_END] routeID=%lu commandID=NA wp=%u mode=%u "
                 "rawL=%ld rawR=%ld L=%ld/%ld R=%ld/%ld "
-                "elapsedMs=%lu safe=%u\n",
+                "PWM=%d/%d coastL=%ld coastR=%ld elapsedMs=%lu safe=%u\n",
+                static_cast<unsigned long>(fleetExecutor.routeID()),
                 fleetExecutor.waypointIndex(),
                 static_cast<unsigned>(motion.mode),
                 static_cast<long>(motion.rawLeftCount),
@@ -460,6 +567,10 @@ namespace
                 static_cast<long>(motion.leftTargetCount),
                 static_cast<long>(motion.rightProgress),
                 static_cast<long>(motion.rightTargetCount),
+                motion.leftPwm,
+                motion.rightPwm,
+                static_cast<long>(motion.leftCoastCount),
+                static_cast<long>(motion.rightCoastCount),
                 static_cast<unsigned long>(motion.elapsedMs),
                 motion.outputsSafe ? 1U : 0U);
         }

@@ -71,6 +71,10 @@ public:
         int32_t rightIntervalDelta = 0;
         int32_t cumulativeSyncError = 0;
         int32_t intervalVelocityError = 0;
+        // Encoder travel observed after PWM was forced to zero at the start
+        // of settling. This is diagnostic only and never changes a target.
+        int32_t leftCoastCount = 0;
+        int32_t rightCoastCount = 0;
         int syncCorrection = 0;
         int leftPwm = 0;
         int rightPwm = 0;
@@ -187,7 +191,10 @@ private:
     int m_SyncCorrection = 0;
     int32_t m_SettlingLastLeft = 0;
     int32_t m_SettlingLastRight = 0;
+    int32_t m_SettlingStartLeft = 0;
+    int32_t m_SettlingStartRight = 0;
     uint32_t m_SettlingLastActivitySequence = 0;
+    bool m_HasSettlingBaseline = false;
     uint8_t m_LeftNoProgressWindows = 0;
     uint8_t m_RightNoProgressWindows = 0;
     float m_VelocityCountsPerSecond = 0.0f;
